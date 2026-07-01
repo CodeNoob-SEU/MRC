@@ -3,6 +3,6 @@
 interface Window {
   mrc?: {
     backendUrl: string;
+    selectOutputDirectory?: () => Promise<string | null>;
   };
 }
-

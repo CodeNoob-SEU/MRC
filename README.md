@@ -258,6 +258,7 @@ $env:MRC_VIDEO_TRIM_MODE="copy"
 ```
 
 If `ffmpeg` is not available, the experiment still completes and records the reason under `alignment.json` -> `video_trim`.
+When ffmpeg is available, the backend also extracts `aligned_first_frame.jpg` and `aligned_last_frame.jpg` into the same experiment output folder for timing checks. Extraction details are recorded under `alignment.json` -> `frame_extract`.
 
 The Windows run scripts use backend port `7876` by default. Before startup, they automatically kill any existing process listening on that port. To override the port:
 

@@ -90,7 +90,7 @@ let previewFrameRequest: number | null = null;
 
 const canStart = computed(() => {
   const state = status.value?.state ?? "idle";
-  return !busy.value && !["armed", "recording"].includes(state);
+  return !busy.value && !["armed", "recording", "finalizing", "manual_recording"].includes(state);
 });
 
 const canStop = computed(() => {
@@ -104,6 +104,7 @@ const stateLabel = computed(() => {
     idle: "待机",
     armed: "等待 Trigger",
     recording: "采集中",
+    finalizing: "整理输出",
     manual_recording: "手动录制中",
     manual_stopped: "手动已停止",
     finished: "完成",
@@ -171,6 +172,17 @@ async function initialize() {
     errorMessage.value = String(error);
   } finally {
     busy.value = false;
+  }
+}
+
+async function chooseOutputRoot() {
+  if (!window.mrc?.selectOutputDirectory) {
+    errorMessage.value = "当前运行环境不支持系统目录选择，请手动输入输出根目录。";
+    return;
+  }
+  const selected = await window.mrc.selectOutputDirectory();
+  if (selected) {
+    outputRoot.value = selected;
   }
 }
 
@@ -456,9 +468,16 @@ onUnmounted(() => {
         <div class="control-body">
           <div class="control-column">
             <div class="form-grid">
-              <label>
+              <label class="output-root-field">
                 <span>输出根目录</span>
-                <input v-model="outputRoot" />
+                <div class="path-picker">
+                  <input v-model="outputRoot" />
+                  <button type="button" :disabled="busy || !canStart" title="选择输出根目录" @click="chooseOutputRoot">
+                    <FolderOpen :size="16" />
+                    选择
+                  </button>
+                </div>
+                <small>输出目录：{{ outputPath }}</small>
               </label>
               <label>
                 <span>采集窗口 min</span>
@@ -508,12 +527,6 @@ onUnmounted(() => {
                 <span>停止 overshoot</span>
                 <strong>{{ status?.stop_overshoot_samples ?? "-" }}</strong>
               </div>
-            </div>
-
-            <div class="output-box">
-              <FolderOpen :size="17" />
-              <span>输出目录</span>
-              <strong>{{ outputPath }}</strong>
             </div>
 
             <div class="sdk-log">

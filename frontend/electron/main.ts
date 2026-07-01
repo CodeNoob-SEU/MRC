@@ -1,4 +1,5 @@
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import type { OpenDialogOptions } from "electron";
 import path from "node:path";
 import fs from "node:fs";
 import { execFileSync, spawn, ChildProcessWithoutNullStreams } from "node:child_process";
@@ -111,6 +112,19 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  ipcMain.handle("select-output-directory", async () => {
+    const options: OpenDialogOptions = {
+      title: "选择输出根目录",
+      properties: ["openDirectory", "createDirectory"]
+    };
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, options)
+      : await dialog.showOpenDialog(options);
+    if (result.canceled || result.filePaths.length === 0) {
+      return null;
+    }
+    return result.filePaths[0];
+  });
   process.env.MRC_BACKEND_URL = BACKEND_URL;
   startBackend();
   createWindow();

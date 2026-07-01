@@ -136,7 +136,7 @@ class ExperimentCoordinator:
         threshold_volts: Optional[float] = None,
     ) -> ExperimentStatus:
         with self._lock:
-            if self._status.state in {"armed", "recording", "manual_recording"}:
+            if self._status.state in {"armed", "recording", "finalizing", "manual_recording"}:
                 raise RuntimeError("Experiment is already running.")
             if camera_fps is not None:
                 self.config.camera.fps = float(camera_fps)
@@ -196,7 +196,7 @@ class ExperimentCoordinator:
         camera_fps: Optional[float] = None,
     ) -> ExperimentStatus:
         with self._lock:
-            if self._status.state in {"armed", "recording", "manual_recording"}:
+            if self._status.state in {"armed", "recording", "finalizing", "manual_recording"}:
                 raise RuntimeError("Experiment is already running.")
             if camera_fps is not None:
                 self.config.camera.fps = float(camera_fps)
@@ -499,11 +499,13 @@ class ExperimentCoordinator:
                         with self._lock:
                             self._status.stop_overshoot_samples = stop_overshoot_samples
                             self._status.video_trim_status = "trimming"
-                            self._set_finished_locked("finished")
+                            self._set_finished_locked("finalizing")
                         self.event_bus.publish("status", self.status_dict())
                         if alignment is not None:
                             self._finalize_aligned_video(alignment_path, alignment)
                             self._write_alignment(alignment_path, alignment)
+                            with self._lock:
+                                self._status.state = "finished"
                             self.event_bus.publish("status", self.status_dict())
                         return
         except Exception as exc:  # noqa: BLE001
@@ -577,6 +579,15 @@ class ExperimentCoordinator:
         self._append_jsonl(
             alignment_path.with_name("events.jsonl"),
             {"type": "video_trim", "payload": trim_result},
+        )
+        frame_extract = self._extract_alignment_check_frames(alignment_path, alignment, trim_result)
+        alignment["frame_extract"] = frame_extract
+        if frame_extract.get("status") == "ok":
+            alignment["files"]["aligned_first_frame"] = Path(str(frame_extract["first_frame_file"])).name
+            alignment["files"]["aligned_last_frame"] = Path(str(frame_extract["last_frame_file"])).name
+        self._append_jsonl(
+            alignment_path.with_name("events.jsonl"),
+            {"type": "frame_extract", "payload": frame_extract},
         )
 
     def _trim_video_from_t0(
@@ -705,6 +716,119 @@ class ExperimentCoordinator:
             "start_seconds": start_seconds,
             "duration_seconds": duration_seconds,
             "errors": errors,
+        }
+
+    def _extract_alignment_check_frames(
+        self,
+        alignment_path: Path,
+        alignment: Dict[str, Any],
+        trim_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        ffmpeg = self._resolve_ffmpeg_executable()
+        if not ffmpeg:
+            return {"status": "skipped", "reason": "ffmpeg was not found; cannot extract check frames"}
+
+        output_dir = alignment_path.parent
+        first_frame = output_dir / "aligned_first_frame.jpg"
+        last_frame = output_dir / "aligned_last_frame.jpg"
+        fps = max(1.0, float(alignment["effective_fps"]))
+        frame_interval_seconds = 1.0 / fps
+        window_seconds = float(alignment["window_seconds"])
+
+        if trim_result.get("status") == "ok":
+            video_source = Path(str(trim_result["output_file"]))
+            first_seconds = 0.0
+            last_seconds = max(0.0, window_seconds - frame_interval_seconds)
+            timing_source = "aligned_video"
+        else:
+            source_text = self.status().video_file
+            if not source_text:
+                return {"status": "skipped", "reason": "source video path is missing"}
+            video_source = Path(source_text)
+            first_seconds = max(0.0, float(alignment["preroll_seconds"]))
+            last_seconds = max(first_seconds, first_seconds + window_seconds - frame_interval_seconds)
+            timing_source = "source_video_estimated_t0"
+
+        if not video_source.exists() or video_source.stat().st_size == 0:
+            return {
+                "status": "skipped",
+                "reason": "video source does not exist or is empty",
+                "video_source": str(video_source),
+            }
+
+        first_result = self._extract_video_frame(
+            ffmpeg=ffmpeg,
+            video_source=video_source,
+            output_file=first_frame,
+            timestamp_seconds=first_seconds,
+        )
+        last_result = self._extract_video_frame(
+            ffmpeg=ffmpeg,
+            video_source=video_source,
+            output_file=last_frame,
+            timestamp_seconds=last_seconds,
+        )
+        if first_result["status"] == "ok" and last_result["status"] == "ok":
+            return {
+                "status": "ok",
+                "timing_source": timing_source,
+                "video_source": str(video_source),
+                "first_frame_file": str(first_frame),
+                "last_frame_file": str(last_frame),
+                "first_timestamp_seconds": first_seconds,
+                "last_timestamp_seconds": last_seconds,
+            }
+        return {
+            "status": "failed",
+            "timing_source": timing_source,
+            "video_source": str(video_source),
+            "first_frame": first_result,
+            "last_frame": last_result,
+        }
+
+    @staticmethod
+    def _extract_video_frame(
+        *,
+        ffmpeg: str,
+        video_source: Path,
+        output_file: Path,
+        timestamp_seconds: float,
+    ) -> Dict[str, Any]:
+        command = [
+            ffmpeg,
+            "-y",
+            "-ss",
+            f"{timestamp_seconds:.6f}",
+            "-i",
+            str(video_source),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            str(output_file),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "failed", "error": str(exc), "command": command}
+        if completed.returncode == 0 and output_file.exists() and output_file.stat().st_size > 0:
+            return {
+                "status": "ok",
+                "output_file": str(output_file),
+                "timestamp_seconds": timestamp_seconds,
+                "command": command,
+            }
+        return {
+            "status": "failed",
+            "returncode": completed.returncode,
+            "stderr_tail": completed.stderr[-2000:],
+            "command": command,
         }
 
     def _resolve_ffmpeg_executable(self) -> Optional[str]:
