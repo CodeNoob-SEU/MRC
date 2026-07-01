@@ -19,7 +19,7 @@ class CameraConfig:
     video_codec: str = "x264 Codec"
     video_source_index: int = 0
     preview_mode: int = 2
-    preview_fps: float = 12.0
+    preview_fps: float = 0.0
     dxmedia_dll: str = "vendor/camera/x64/DXMediaCap.dll"
 
 

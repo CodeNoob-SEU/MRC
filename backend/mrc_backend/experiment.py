@@ -282,10 +282,11 @@ class ExperimentCoordinator:
         self._preview_worker.start()
 
     def _preview_loop(self) -> None:
-        interval_seconds = 1.0 / max(1.0, min(30.0, float(self.config.camera.preview_fps)))
         last_error_message = ""
         last_error_at = 0.0
         while not self._preview_stop_event.is_set():
+            preview_fps = self._effective_preview_fps()
+            interval_seconds = 1.0 / preview_fps
             started_at = time.monotonic()
             try:
                 frame = self.camera.preview_frame_data_url()
@@ -296,6 +297,7 @@ class ExperimentCoordinator:
                             "src": frame,
                             "mode": self.camera.status().mode,
                             "recording": self.camera.status().recording,
+                            "fps": preview_fps,
                         },
                     )
                     last_error_message = ""
@@ -308,6 +310,14 @@ class ExperimentCoordinator:
                     last_error_at = now
             elapsed_seconds = time.monotonic() - started_at
             self._preview_stop_event.wait(max(0.0, interval_seconds - elapsed_seconds))
+
+    def _effective_preview_fps(self) -> float:
+        configured_preview_fps = float(self.config.camera.preview_fps)
+        if configured_preview_fps > 0:
+            return max(1.0, min(60.0, configured_preview_fps))
+        camera_status = self.camera.status()
+        capture_fps = float(camera_status.fps or self.config.camera.fps)
+        return max(1.0, min(60.0, capture_fps))
 
     def _set_error(self, message: str) -> None:
         with self._lock:

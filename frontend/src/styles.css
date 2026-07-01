@@ -155,7 +155,19 @@ button:disabled {
   background: #111820;
 }
 
+.preview-image {
+  grid-area: 1 / 1;
+  opacity: 0;
+  visibility: hidden;
+}
+
+.preview-image.active {
+  opacity: 1;
+  visibility: visible;
+}
+
 .video-empty {
+  grid-area: 1 / 1;
   color: #b7c0ca;
   font-size: 15px;
 }

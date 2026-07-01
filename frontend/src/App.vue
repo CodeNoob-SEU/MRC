@@ -11,6 +11,7 @@ type HardwareStatus = {
   device_name?: string;
   sample_rate_hz?: number;
   trigger_channel?: number;
+  fps?: number;
   active_file?: string | null;
   capture_status?: string;
   video_source_status?: string;
@@ -74,7 +75,8 @@ const wsUrl = backendUrl.replace("http", "ws") + "/ws";
 const status = ref<AppStatus | null>(null);
 const triggers = ref<TriggerRow[]>([]);
 const waveform = ref<number[]>([]);
-const previewSrc = ref("");
+const previewFrames = ref<[string, string]>(["", ""]);
+const activePreviewIndex = ref(0);
 const previewError = ref("");
 const connection = ref("connecting");
 const busy = ref(false);
@@ -85,8 +87,8 @@ const thresholdVolts = ref(2.5);
 const errorMessage = ref("");
 const recordingMode = ref<"trigger" | "manual">("trigger");
 let socket: WebSocket | null = null;
-let latestPreviewSrc = "";
-let previewFrameRequest: number | null = null;
+let pendingPreviewSrc = "";
+let previewDecodeBusy = false;
 
 const canStart = computed(() => {
   const state = status.value?.state ?? "idle";
@@ -138,6 +140,8 @@ const remainingWindowLabel = computed(() => {
 const outputPath = computed(() => status.value?.output_dir ?? "-");
 const cameraOnline = computed(() => Boolean(status.value?.camera?.initialized));
 const daqOnline = computed(() => Boolean(status.value?.daq?.initialized));
+const hasPreviewFrame = computed(() => previewFrames.value.some(Boolean));
+const effectiveCameraFps = computed(() => status.value?.camera?.fps || cameraFps.value);
 const trimStatusLabel = computed(() => {
   if (status.value?.aligned_video_file) {
     return "裁剪完成";
@@ -238,16 +242,41 @@ async function stopExperiment() {
   }
 }
 
-function queuePreviewFrame(src: string) {
-  latestPreviewSrc = src;
-  if (previewFrameRequest !== null) {
+async function queuePreviewFrame(src: string) {
+  pendingPreviewSrc = src;
+  if (previewDecodeBusy) {
     return;
   }
-  previewFrameRequest = window.requestAnimationFrame(() => {
-    previewFrameRequest = null;
-    previewSrc.value = latestPreviewSrc;
-    previewError.value = "";
-  });
+  await decodeLatestPreviewFrame();
+}
+
+async function decodeLatestPreviewFrame() {
+  while (pendingPreviewSrc) {
+    const src = pendingPreviewSrc;
+    pendingPreviewSrc = "";
+    previewDecodeBusy = true;
+    try {
+      const image = new Image();
+      image.decoding = "async";
+      image.src = src;
+      if (image.decode) {
+        await image.decode();
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          image.onload = () => resolve();
+          image.onerror = () => reject(new Error("preview image decode failed"));
+        });
+      }
+      const nextIndex = activePreviewIndex.value === 0 ? 1 : 0;
+      previewFrames.value[nextIndex] = src;
+      activePreviewIndex.value = nextIndex;
+      previewError.value = "";
+    } catch (error) {
+      previewError.value = String(error);
+    } finally {
+      previewDecodeBusy = false;
+    }
+  }
 }
 
 function connectSocket() {
@@ -313,9 +342,6 @@ onMounted(() => {
 
 onUnmounted(() => {
   socket?.close();
-  if (previewFrameRequest !== null) {
-    window.cancelAnimationFrame(previewFrameRequest);
-  }
 });
 </script>
 
@@ -331,8 +357,17 @@ onUnmounted(() => {
           <small>{{ status?.camera?.recording ? "REC" : "LIVE" }}</small>
         </div>
         <div class="video-stage">
-          <img v-if="previewSrc" :src="previewSrc" alt="Camera preview" decoding="async" />
-          <div v-else class="video-empty">等待相机初始化</div>
+          <img
+            v-for="(frame, index) in previewFrames"
+            v-show="frame"
+            :key="index"
+            :src="frame"
+            alt="Camera preview"
+            class="preview-image"
+            :class="{ active: index === activePreviewIndex }"
+            decoding="async"
+          />
+          <div v-if="!hasPreviewFrame" class="video-empty">等待相机初始化</div>
           <span v-if="previewError" class="preview-error">{{ previewError }}</span>
         </div>
       </section>
@@ -484,8 +519,8 @@ onUnmounted(() => {
                 <input v-model.number="windowMinutes" type="number" min="0.01" step="0.01" />
               </label>
               <label>
-                <span>相机 FPS</span>
-                <input v-model.number="cameraFps" type="number" min="1" step="0.1" />
+                <span>相机 FPS · 当前 {{ effectiveCameraFps.toFixed(1) }}</span>
+                <input v-model.number="cameraFps" type="number" min="1" step="0.1" :disabled="!canStart" />
               </label>
               <label>
                 <span>Trigger 阈值 V</span>
