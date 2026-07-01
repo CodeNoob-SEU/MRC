@@ -5,7 +5,7 @@ from dataclasses import asdict
 import os
 import platform
 import sys
-from typing import Any
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,13 +17,13 @@ from .experiment import ExperimentCoordinator
 
 
 class StartExperimentRequest(BaseModel):
-    output_root: str | None = None
-    window_minutes: float | None = None
-    camera_fps: float | None = None
-    threshold_volts: float | None = None
+    output_root: Optional[str] = None
+    window_minutes: Optional[float] = None
+    camera_fps: Optional[float] = None
+    threshold_volts: Optional[float] = None
 
 
-def create_app(config: AppConfig | None = None, repo_root: Path | None = None) -> FastAPI:
+def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = None) -> FastAPI:
     config = config or AppConfig.from_env()
     repo_root = repo_root or Path(__file__).resolve().parents[2]
     event_bus = EventBus()
@@ -52,23 +52,23 @@ def create_app(config: AppConfig | None = None, repo_root: Path | None = None) -
         coordinator.close()
 
     @app.get("/health")
-    def health() -> dict[str, Any]:
+    def health() -> Dict[str, Any]:
         return {"ok": True, "status": coordinator.status_dict()}
 
     @app.get("/status")
-    def status() -> dict[str, Any]:
+    def status() -> Dict[str, Any]:
         return coordinator.status_dict()
 
     @app.get("/devices")
-    def devices() -> dict[str, Any]:
+    def devices() -> Dict[str, Any]:
         return coordinator.devices()
 
     @app.get("/diagnostics/hardware")
-    def diagnostics() -> dict[str, Any]:
+    def diagnostics() -> Dict[str, Any]:
         return coordinator.diagnostics()
 
     @app.get("/diagnostics/runtime")
-    def runtime_diagnostics() -> dict[str, Any]:
+    def runtime_diagnostics() -> Dict[str, Any]:
         dxmedia_dll = (repo_root / config.camera.dxmedia_dll).resolve()
         usb3000_dll = (repo_root / config.daq.usb3000_dll).resolve()
         return {
@@ -92,14 +92,14 @@ def create_app(config: AppConfig | None = None, repo_root: Path | None = None) -
         }
 
     @app.post("/initialize")
-    def initialize() -> dict[str, Any]:
+    def initialize() -> Dict[str, Any]:
         try:
             return asdict(coordinator.initialize())
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/experiment/start")
-    def start_experiment(request: StartExperimentRequest) -> dict[str, Any]:
+    def start_experiment(request: StartExperimentRequest) -> Dict[str, Any]:
         try:
             return asdict(coordinator.start_experiment(
                 output_root=request.output_root,
@@ -111,7 +111,7 @@ def create_app(config: AppConfig | None = None, repo_root: Path | None = None) -
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/experiment/stop")
-    def stop_experiment() -> dict[str, Any]:
+    def stop_experiment() -> Dict[str, Any]:
         try:
             return asdict(coordinator.stop_experiment())
         except Exception as exc:  # noqa: BLE001

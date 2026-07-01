@@ -8,6 +8,7 @@ import os
 import platform
 import tempfile
 import time
+from typing import Dict, List, Optional
 from urllib.parse import quote
 
 from ..config import CameraConfig, resolve_path
@@ -45,7 +46,7 @@ class CameraStatus:
     device_count: int = 0
     device_name: str = ""
     frame_mapping_mode: str = "estimated_fps"
-    active_file: str | None = None
+    active_file: Optional[str] = None
 
 
 class BaseCamera:
@@ -64,7 +65,7 @@ class BaseCamera:
     def status(self) -> CameraStatus:
         raise NotImplementedError
 
-    def preview_frame_data_url(self) -> str | None:
+    def preview_frame_data_url(self) -> Optional[str]:
         raise NotImplementedError
 
 
@@ -101,7 +102,7 @@ class MockCamera(BaseCamera):
     def status(self) -> CameraStatus:
         return replace(self._status)
 
-    def preview_frame_data_url(self) -> str | None:
+    def preview_frame_data_url(self) -> Optional[str]:
         now = time.time()
         phase = int((now * 10) % 360)
         active = "#1f6f62" if self._status.recording else "#456070"
@@ -127,7 +128,7 @@ class MockCamera(BaseCamera):
         """
         return "data:image/svg+xml;charset=utf-8," + quote(svg)
 
-    def enumerate_devices(self) -> list[dict[str, object]]:
+    def enumerate_devices(self) -> List[Dict[str, object]]:
         return [{"idx": 0, "device_name": "Mock MRC camera"}]
 
 
@@ -136,8 +137,8 @@ class DXMediaCamera(BaseCamera):
         self.config = config
         self.repo_root = repo_root
         self.dll_path = resolve_path(config.dxmedia_dll, repo_root)
-        self._dll: ctypes.CDLL | None = None
-        self._handle: ctypes.c_void_p | None = None
+        self._dll: Optional[ctypes.CDLL] = None
+        self._handle: Optional[ctypes.c_void_p] = None
         self._status = CameraStatus(mode="real")
         self._runtime_dir_added = False
 
@@ -198,7 +199,7 @@ class DXMediaCamera(BaseCamera):
         dll.DXSnapToJPGFile.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint, ctypes.c_void_p]
         dll.DXSnapToJPGFile.restype = ctypes.c_uint
 
-    def enumerate_devices(self) -> list[dict[str, object]]:
+    def enumerate_devices(self) -> List[Dict[str, object]]:
         dll = self._load()
         result = dll.DXInitialize()
         if result != 0:
@@ -211,7 +212,7 @@ class DXMediaCamera(BaseCamera):
         enum_result = dll.DXEnumVideoDevices(tags, ctypes.byref(num))
         if enum_result != 0:
             raise CameraError(f"DXEnumVideoDevices failed with code {format_sdk_code(enum_result)}")
-        devices: list[dict[str, object]] = []
+        devices: List[Dict[str, object]] = []
         for idx in range(int(num.value)):
             name = bytes(tags[idx].deviceName).split(b"\0", 1)[0].decode("mbcs", errors="replace")
             devices.append({"idx": int(tags[idx].idx), "device_name": name})
@@ -303,7 +304,7 @@ class DXMediaCamera(BaseCamera):
     def status(self) -> CameraStatus:
         return replace(self._status)
 
-    def preview_frame_data_url(self) -> str | None:
+    def preview_frame_data_url(self) -> Optional[str]:
         if self._dll is None or self._handle is None or not self._status.initialized:
             return None
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:

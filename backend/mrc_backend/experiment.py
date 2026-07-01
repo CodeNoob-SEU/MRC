@@ -9,7 +9,7 @@ import logging
 import sqlite3
 import threading
 import traceback
-from typing import Any
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from .config import AppConfig
@@ -21,17 +21,17 @@ from .hardware.daq import BaseDaq, DaqStatus, TriggerDetector, build_daq
 @dataclass
 class ExperimentStatus:
     state: str = "idle"
-    session_id: str | None = None
-    output_dir: str | None = None
-    video_file: str | None = None
+    session_id: Optional[str] = None
+    output_dir: Optional[str] = None
+    video_file: Optional[str] = None
     trigger_count: int = 0
-    started_at: str | None = None
-    first_trigger_at: str | None = None
+    started_at: Optional[str] = None
+    first_trigger_at: Optional[str] = None
     elapsed_seconds: float = 0.0
-    window_remaining_seconds: float | None = None
-    last_error: str | None = None
-    camera: dict[str, Any] | None = None
-    daq: dict[str, Any] | None = None
+    window_remaining_seconds: Optional[float] = None
+    last_error: Optional[str] = None
+    camera: Optional[Dict[str, Any]] = None
+    daq: Optional[Dict[str, Any]] = None
 
 
 class ExperimentCoordinator:
@@ -43,9 +43,9 @@ class ExperimentCoordinator:
         self.daq: BaseDaq = build_daq(config.hardware_mode, config.daq, repo_root)
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
-        self._worker: threading.Thread | None = None
+        self._worker: Optional[threading.Thread] = None
         self._preview_stop_event = threading.Event()
-        self._preview_worker: threading.Thread | None = None
+        self._preview_worker: Optional[threading.Thread] = None
         self._status = ExperimentStatus(
             camera=asdict(self.camera.status()),
             daq=asdict(self.daq.status()),
@@ -63,7 +63,7 @@ class ExperimentCoordinator:
         self.event_bus.publish("status", self.status_dict())
         return self.status()
 
-    def devices(self) -> dict[str, Any]:
+    def devices(self) -> Dict[str, Any]:
         with self._lock:
             return {
                 "hardware_mode": self.config.hardware_mode,
@@ -71,8 +71,8 @@ class ExperimentCoordinator:
                 "daq": asdict(self.daq.status()),
             }
 
-    def diagnostics(self) -> dict[str, Any]:
-        result: dict[str, Any] = {
+    def diagnostics(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
             "hardware_mode": self.config.hardware_mode,
             "camera": {
                 "ok": False,
@@ -107,10 +107,10 @@ class ExperimentCoordinator:
 
     def start_experiment(
         self,
-        output_root: str | None = None,
-        window_minutes: float | None = None,
-        camera_fps: float | None = None,
-        threshold_volts: float | None = None,
+        output_root: Optional[str] = None,
+        window_minutes: Optional[float] = None,
+        camera_fps: Optional[float] = None,
+        threshold_volts: Optional[float] = None,
     ) -> ExperimentStatus:
         with self._lock:
             if self._status.state in {"armed", "recording"}:
@@ -155,7 +155,7 @@ class ExperimentCoordinator:
         return self.status()
 
     def stop_experiment(self) -> ExperimentStatus:
-        worker: threading.Thread | None
+        worker: Optional[threading.Thread]
         with self._lock:
             worker = self._worker
             self._stop_event.set()
@@ -171,7 +171,7 @@ class ExperimentCoordinator:
         with self._lock:
             return replace(self._status)
 
-    def status_dict(self) -> dict[str, Any]:
+    def status_dict(self) -> Dict[str, Any]:
         return asdict(self.status())
 
     def close(self) -> None:
@@ -239,8 +239,8 @@ class ExperimentCoordinator:
             sample_rate_hz=self.config.daq.sample_rate_hz,
         )
         global_sample = 0
-        first_trigger_sample: int | None = None
-        end_sample: int | None = None
+        first_trigger_sample: Optional[int] = None
+        end_sample: Optional[int] = None
 
         try:
             with trigger_csv.open("w", newline="", encoding="utf-8") as csv_file, sqlite3.connect(db_path) as db:
@@ -354,7 +354,7 @@ class ExperimentCoordinator:
             finally:
                 self._set_error(str(exc))
 
-    def _publish_waveform(self, samples: list[float], global_sample: int) -> None:
+    def _publish_waveform(self, samples: List[float], global_sample: int) -> None:
         if not samples:
             return
         payload = {
@@ -367,6 +367,6 @@ class ExperimentCoordinator:
         self.event_bus.publish("waveform", payload)
 
     @staticmethod
-    def _append_jsonl(path: Path, event: dict[str, Any]) -> None:
+    def _append_jsonl(path: Path, event: Dict[str, Any]) -> None:
         with path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(event, ensure_ascii=False) + "\n")

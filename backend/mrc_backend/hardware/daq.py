@@ -7,6 +7,7 @@ import math
 import os
 import platform
 import time
+from typing import List, Optional
 
 from ..config import DaqConfig, resolve_path
 
@@ -56,10 +57,10 @@ class TriggerDetector:
         self.debounce_samples = max(1, int(round(debounce_seconds * sample_rate_hz)))
         self.sample_rate_hz = sample_rate_hz
         self.last_high = False
-        self.last_trigger_sample: int | None = None
+        self.last_trigger_sample: Optional[int] = None
 
-    def process(self, samples: list[float], batch_start_sample: int) -> list[TriggerDetection]:
-        detections: list[TriggerDetection] = []
+    def process(self, samples: List[float], batch_start_sample: int) -> List[TriggerDetection]:
+        detections: List[TriggerDetection] = []
         for index, value in enumerate(samples):
             high = value > self.threshold
             if high and not self.last_high:
@@ -81,7 +82,7 @@ class BaseDaq:
     def start_sampling(self) -> DaqStatus:
         raise NotImplementedError
 
-    def read_batch(self) -> list[float]:
+    def read_batch(self) -> List[float]:
         raise NotImplementedError
 
     def stop_sampling(self) -> DaqStatus:
@@ -116,10 +117,10 @@ class MockDaq(BaseDaq):
         self._status.sampling = True
         return self.status()
 
-    def read_batch(self) -> list[float]:
+    def read_batch(self) -> List[float]:
         if not self._status.sampling:
             raise DaqError("Mock DAQ is not sampling.")
-        batch: list[float] = []
+        batch: List[float] = []
         for i in range(self.config.batch_points):
             sample = self._sample_number + i
             phase = sample / self.config.sample_rate_hz
@@ -152,7 +153,7 @@ class USB3000Daq(BaseDaq):
         self.config = config
         self.repo_root = repo_root
         self.dll_path = resolve_path(config.usb3000_dll, repo_root)
-        self._dll: ctypes.CDLL | None = None
+        self._dll: Optional[ctypes.CDLL] = None
         self._status = DaqStatus(
             mode="real",
             sample_rate_hz=config.sample_rate_hz,
@@ -232,7 +233,7 @@ class USB3000Daq(BaseDaq):
         self._status.sampling = True
         return self.status()
 
-    def read_batch(self) -> list[float]:
+    def read_batch(self) -> List[float]:
         if self._dll is None or not self._status.sampling:
             raise DaqError("USB3000 DAQ is not sampling.")
         result = self._dll.USB3GetAi(
