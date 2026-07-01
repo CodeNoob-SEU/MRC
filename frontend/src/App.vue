@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { Play, RotateCw, Square, Usb, Video, AlertTriangle } from "lucide-vue-next";
+import { Activity, FolderOpen, Play, RotateCw, Square, Usb, Video, AlertTriangle } from "lucide-vue-next";
 
 type HardwareStatus = {
   mode: string;
@@ -104,6 +104,29 @@ const stateLabel = computed(() => {
   };
   return labels[state] ?? state;
 });
+
+const effectiveFrameRange = computed(() => {
+  if (status.value?.usable_video_frame_start == null || status.value.usable_video_frame_end == null) {
+    return "-";
+  }
+  return `${status.value.usable_video_frame_start}-${status.value.usable_video_frame_end}`;
+});
+
+const prerollLabel = computed(() => {
+  if (status.value?.preroll_seconds == null) {
+    return "-";
+  }
+  return `${status.value.preroll_seconds.toFixed(3)} s`;
+});
+
+const remainingWindowLabel = computed(() => {
+  if (status.value?.window_remaining_seconds == null) {
+    return "-";
+  }
+  return `${status.value.window_remaining_seconds.toFixed(1)} s`;
+});
+
+const outputPath = computed(() => status.value?.output_dir ?? "-");
 
 async function api(path: string, init?: RequestInit) {
   const response = await fetch(`${backendUrl}${path}`, {
@@ -234,153 +257,176 @@ onUnmounted(() => {
 
 <template>
   <main class="shell">
-    <header class="topbar">
-      <div>
-        <h1>MRC Integrated Acquisition</h1>
-        <p>{{ stateLabel }} · {{ connection }}</p>
-      </div>
-      <div class="toolbar">
-        <button class="secondary" :disabled="busy" @click="initialize">
-          <RotateCw :size="17" />
-          初始化
-        </button>
-        <button class="primary" :disabled="!canStart" @click="startExperiment">
-          <Play :size="17" />
-          开始
-        </button>
-        <button class="danger" :disabled="!canStop" @click="stopExperiment">
-          <Square :size="17" />
-          停止
-        </button>
-      </div>
-    </header>
+    <section class="lab-layout">
+      <section class="lab-panel video-panel">
+        <div class="panel-title">
+          <span>原始视频1号</span>
+          <small>{{ status?.camera?.recording ? "REC" : "LIVE" }}</small>
+        </div>
+        <div class="video-stage">
+          <img v-if="previewSrc" :src="previewSrc" alt="Camera preview" />
+          <div v-else class="video-empty">等待相机初始化</div>
+          <span v-if="previewError" class="preview-error">{{ previewError }}</span>
+        </div>
+      </section>
 
-    <section v-if="errorMessage || status?.last_error" class="alert">
-      <AlertTriangle :size="18" />
-      <span>{{ errorMessage || status?.last_error }}</span>
-    </section>
+      <section class="lab-panel video-panel">
+        <div class="panel-title">
+          <span>原始视频2号</span>
+          <small>standby</small>
+        </div>
+        <div class="video-stage video-placeholder">
+          <strong>原始视频2号</strong>
+          <span>待加入</span>
+        </div>
+      </section>
 
-    <section class="overview">
-      <div class="metric">
-        <span>Trigger</span>
-        <strong>{{ status?.trigger_count ?? 0 }}</strong>
-      </div>
-      <div class="metric">
-        <span>相对时间</span>
-        <strong>{{ (status?.elapsed_seconds ?? 0).toFixed(3) }} s</strong>
-      </div>
-      <div class="metric">
-        <span>剩余窗口</span>
-        <strong>{{ status?.window_remaining_seconds == null ? "-" : status.window_remaining_seconds.toFixed(1) + " s" }}</strong>
-      </div>
-      <div class="metric">
-        <span>同步 t0</span>
-        <strong>{{ status?.t0_locked ? "locked" : "waiting" }}</strong>
-      </div>
-      <div class="metric">
-        <span>预计总帧数</span>
-        <strong>{{ status?.expected_total_frames ?? "-" }}</strong>
-      </div>
-      <div class="metric">
-        <span>有效视频帧</span>
-        <strong>{{ status?.usable_video_frame_start == null ? "-" : status.usable_video_frame_start + "-" + status?.usable_video_frame_end }}</strong>
-      </div>
-      <div class="metric">
-        <span>预录时长</span>
-        <strong>{{ status?.preroll_seconds == null ? "-" : status.preroll_seconds.toFixed(3) + " s" }}</strong>
-      </div>
-      <div class="metric wide">
-        <span>输出目录</span>
-        <strong>{{ status?.output_dir ?? "-" }}</strong>
-      </div>
-    </section>
-
-    <section class="workspace">
-      <div class="left">
-        <section class="panel">
-          <h2>相机实时画面</h2>
-          <div class="preview">
-            <img v-if="previewSrc" :src="previewSrc" alt="Camera preview" />
-            <div v-else class="preview-empty">等待相机初始化</div>
-            <span v-if="previewError" class="preview-error">{{ previewError }}</span>
+      <section class="lab-panel trigger-panel">
+        <div class="panel-title">
+          <span>Trigger</span>
+          <small>{{ status?.sync_timebase ?? "daq_sample_clock" }}</small>
+        </div>
+        <div class="trigger-metrics">
+          <div>
+            <span>Trigger</span>
+            <strong>{{ status?.trigger_count ?? 0 }}</strong>
           </div>
-        </section>
-
-        <section class="panel">
-          <h2>实验参数</h2>
-          <div class="form-grid">
-            <label>
-              <span>输出根目录</span>
-              <input v-model="outputRoot" />
-            </label>
-            <label>
-              <span>采集窗口 min</span>
-              <input v-model.number="windowMinutes" type="number" min="0.01" step="0.01" />
-            </label>
-            <label>
-              <span>相机 FPS</span>
-              <input v-model.number="cameraFps" type="number" min="1" step="0.1" />
-            </label>
-            <label>
-              <span>Trigger 阈值 V</span>
-              <input v-model.number="thresholdVolts" type="number" min="0" step="0.1" />
-            </label>
+          <div>
+            <span>rel time</span>
+            <strong>{{ (status?.elapsed_seconds ?? 0).toFixed(3) }} s</strong>
           </div>
+          <div>
+            <span>remaining</span>
+            <strong>{{ remainingWindowLabel }}</strong>
+          </div>
+          <div>
+            <span>t0</span>
+            <strong>{{ status?.t0_locked ? "locked" : "waiting" }}</strong>
+          </div>
+        </div>
+        <svg class="waveform" viewBox="0 0 560 96" preserveAspectRatio="none">
+          <path class="threshold" d="M 0 48 L 560 48" />
+          <path class="trace" :d="sparklinePath(waveform)" />
+        </svg>
+        <div class="trigger-table">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>rel s</th>
+                <th>sample</th>
+                <th>t0 frame</th>
+                <th>video frame</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="trigger in triggers" :key="trigger.trigger_index">
+                <td>{{ trigger.trigger_index }}</td>
+                <td>{{ trigger.relative_time_seconds }}</td>
+                <td>{{ trigger.sample_number }}</td>
+                <td>{{ trigger.frame_index_from_t0 ?? trigger.frame_index }}</td>
+                <td>{{ trigger.video_frame_index_estimated ?? "-" }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="lab-panel control-panel">
+        <div class="panel-title">
+          <span>参数设置 / 系统状态 / 开关</span>
+          <small>{{ stateLabel }} · {{ connection }}</small>
+        </div>
+
+        <section v-if="errorMessage || status?.last_error" class="alert">
+          <AlertTriangle :size="17" />
+          <span>{{ errorMessage || status?.last_error }}</span>
         </section>
 
-        <section class="panel">
-          <h2>Trigger 波形</h2>
-          <svg class="waveform" viewBox="0 0 560 96" preserveAspectRatio="none">
-            <path class="threshold" d="M 0 48 L 560 48" />
-            <path class="trace" :d="sparklinePath(waveform)" />
-          </svg>
-        </section>
+        <div class="control-actions">
+          <button class="secondary" :disabled="busy" @click="initialize">
+            <RotateCw :size="17" />
+            初始化
+          </button>
+          <button class="primary" :disabled="!canStart" @click="startExperiment">
+            <Play :size="17" />
+            开始
+          </button>
+          <button class="danger" :disabled="!canStop" @click="stopExperiment">
+            <Square :size="17" />
+            停止
+          </button>
+        </div>
 
-        <section class="panel">
-          <h2>硬件状态</h2>
-          <div class="hardware">
-            <div>
-              <Video :size="20" />
-              <span>Camera</span>
-              <strong>{{ status?.camera?.mode ?? "-" }} · {{ status?.camera?.recording ? "recording" : "idle" }}</strong>
-              <small>{{ status?.camera?.device_name ?? "No device name" }}</small>
-              <small v-if="status?.camera?.preview_status">{{ status.camera.preview_status }}</small>
-              <small v-if="status?.camera?.capture_status">{{ status.camera.capture_status }}</small>
+        <div class="control-body">
+          <div class="control-column">
+            <div class="form-grid">
+              <label>
+                <span>输出根目录</span>
+                <input v-model="outputRoot" />
+              </label>
+              <label>
+                <span>采集窗口 min</span>
+                <input v-model.number="windowMinutes" type="number" min="0.01" step="0.01" />
+              </label>
+              <label>
+                <span>相机 FPS</span>
+                <input v-model.number="cameraFps" type="number" min="1" step="0.1" />
+              </label>
+              <label>
+                <span>Trigger 阈值 V</span>
+                <input v-model.number="thresholdVolts" type="number" min="0" step="0.1" />
+              </label>
             </div>
-            <div>
-              <Usb :size="20" />
-              <span>USB3000</span>
-              <strong>{{ status?.daq?.mode ?? "-" }} · {{ status?.daq?.sampling ? "sampling" : "idle" }}</strong>
-              <small>{{ status?.daq?.sample_rate_hz ?? 0 }} Hz · AI{{ status?.daq?.trigger_channel ?? 0 }}</small>
+          </div>
+
+          <div class="control-column">
+            <div class="status-grid">
+              <div class="status-card">
+                <Video :size="18" />
+                <span>Camera</span>
+                <strong>{{ status?.camera?.mode ?? "-" }} · {{ status?.camera?.recording ? "recording" : "idle" }}</strong>
+                <small>{{ status?.camera?.device_name ?? "No device name" }}</small>
+              </div>
+              <div class="status-card">
+                <Usb :size="18" />
+                <span>USB3000</span>
+                <strong>{{ status?.daq?.mode ?? "-" }} · {{ status?.daq?.sampling ? "sampling" : "idle" }}</strong>
+                <small>{{ status?.daq?.sample_rate_hz ?? 0 }} Hz · AI{{ status?.daq?.trigger_channel ?? 0 }}</small>
+              </div>
+            </div>
+
+            <div class="sync-grid">
+              <div>
+                <span>预计总帧数</span>
+                <strong>{{ status?.expected_total_frames ?? "-" }}</strong>
+              </div>
+              <div>
+                <span>有效视频帧</span>
+                <strong>{{ effectiveFrameRange }}</strong>
+              </div>
+              <div>
+                <span>预录时长</span>
+                <strong>{{ prerollLabel }}</strong>
+              </div>
+              <div>
+                <span>停止 overshoot</span>
+                <strong>{{ status?.stop_overshoot_samples ?? "-" }}</strong>
+              </div>
+            </div>
+
+            <div class="output-box">
+              <FolderOpen :size="17" />
+              <span>输出目录</span>
+              <strong>{{ outputPath }}</strong>
+            </div>
+
+            <div class="sdk-log">
+              <Activity :size="17" />
+              <span>{{ status?.camera?.preview_status || status?.camera?.capture_status || "等待硬件状态" }}</span>
             </div>
           </div>
-        </section>
-      </div>
-
-      <section class="panel table-panel">
-        <h2>Trigger 事件</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>时间</th>
-              <th>rel s</th>
-              <th>sample</th>
-              <th>t0 frame</th>
-              <th>video frame</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="trigger in triggers" :key="trigger.trigger_index">
-              <td>{{ trigger.trigger_index }}</td>
-              <td>{{ trigger.absolute_time }}</td>
-              <td>{{ trigger.relative_time_seconds }}</td>
-              <td>{{ trigger.sample_number }}</td>
-              <td>{{ trigger.frame_index_from_t0 ?? trigger.frame_index }}</td>
-              <td>{{ trigger.video_frame_index_estimated ?? "-" }}</td>
-            </tr>
-          </tbody>
-        </table>
+        </div>
       </section>
     </section>
   </main>

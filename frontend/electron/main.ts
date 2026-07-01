@@ -84,10 +84,10 @@ function stopBackend(): void {
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 980,
-    minHeight: 680,
+    width: 1600,
+    height: 960,
+    minWidth: 1280,
+    minHeight: 760,
     backgroundColor: "#f6f7f9",
     title: "MRC Integrated Acquisition",
     webPreferences: {
