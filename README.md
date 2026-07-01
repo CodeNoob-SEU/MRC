@@ -88,6 +88,20 @@ $env:MRC_CAMERA_DEVICE_INDEX="1"
 
 If the old vendor software that works is 32-bit, also test the vendor x64 demo from the original SDK. This app uses 64-bit Python and the x64 SDK DLLs.
 
+The old `MRC代码/AppExe/VCDemo.exe` is a 32-bit demo. This app uses the x64 SDK. To test the same x64 camera runtime shipped in this repository:
+
+```powershell
+.\scripts\run_vendor_camera_x64_demo.ps1
+```
+
+If the x64 vendor demo also fails to open the camera while the 32-bit old demo works, install/repair the x64 camera driver/runtime or run this app through a 32-bit helper design. A 64-bit Python process cannot load the 32-bit `DXMediaCap.dll`.
+
+Runtime details can be checked with:
+
+```powershell
+curl http://127.0.0.1:7876/diagnostics/runtime
+```
+
 The Windows run scripts use backend port `7876` by default. Before startup, they automatically kill any existing process listening on that port. To override the port:
 
 ```powershell

@@ -6,6 +6,7 @@ Expected runtime layout:
 
 - `camera/x64/DXMediaCap.dll` and related camera SDK DLLs
 - camera SDK `.ini`, `.config`, and `.lib` files from the x64 demo folder
+- camera SDK x64 demo executables for runtime verification
 - `camera/include/DXMediaCap.h`
 - `camera/include/datastru.h`
 - `daq/x64/USB3000.dll`

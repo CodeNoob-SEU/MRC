@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from dataclasses import asdict
+import os
+import platform
+import sys
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -63,6 +66,25 @@ def create_app(config: AppConfig | None = None, repo_root: Path | None = None) -
     @app.get("/diagnostics/hardware")
     def diagnostics() -> dict[str, Any]:
         return coordinator.diagnostics()
+
+    @app.get("/diagnostics/runtime")
+    def runtime_diagnostics() -> dict[str, Any]:
+        return {
+            "python_executable": sys.executable,
+            "python_version": sys.version,
+            "python_architecture": platform.architecture()[0],
+            "machine": platform.machine(),
+            "platform": platform.platform(),
+            "cwd": os.getcwd(),
+            "repo_root": str(repo_root),
+            "hardware_mode": config.hardware_mode,
+            "backend_host": config.host,
+            "backend_port": config.port,
+            "camera_device_index": config.camera.device_index,
+            "daq_device_index": config.daq.device_index,
+            "dxmedia_dll": str((repo_root / config.camera.dxmedia_dll).resolve()),
+            "usb3000_dll": str((repo_root / config.daq.usb3000_dll).resolve()),
+        }
 
     @app.post("/initialize")
     def initialize() -> dict[str, Any]:
