@@ -100,6 +100,28 @@ button:disabled {
   white-space: nowrap;
 }
 
+.title-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.96), 0 0 0 3px rgba(23, 33, 43, 0.1);
+}
+
+.status-dot.online {
+  background: #1f9d55;
+}
+
+.status-dot.offline {
+  background: #c53f3f;
+}
+
 .panel-title small {
   color: #647180;
   font-size: 12px;

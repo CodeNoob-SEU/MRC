@@ -135,6 +135,8 @@ const remainingWindowLabel = computed(() => {
 });
 
 const outputPath = computed(() => status.value?.output_dir ?? "-");
+const cameraOnline = computed(() => Boolean(status.value?.camera?.initialized));
+const daqOnline = computed(() => Boolean(status.value?.daq?.initialized));
 const trimStatusLabel = computed(() => {
   if (status.value?.aligned_video_file) {
     return "裁剪完成";
@@ -310,7 +312,10 @@ onUnmounted(() => {
     <section class="lab-layout">
       <section class="lab-panel video-panel">
         <div class="panel-title">
-          <span>原始视频1号</span>
+          <span class="title-label">
+            <i class="status-dot" :class="cameraOnline ? 'online' : 'offline'" aria-hidden="true"></i>
+            原始视频1号
+          </span>
           <small>{{ status?.camera?.recording ? "REC" : "LIVE" }}</small>
         </div>
         <div class="video-stage">
@@ -322,7 +327,10 @@ onUnmounted(() => {
 
       <section class="lab-panel video-panel">
         <div class="panel-title">
-          <span>原始视频2号</span>
+          <span class="title-label">
+            <i class="status-dot offline" aria-hidden="true"></i>
+            原始视频2号
+          </span>
           <small>standby</small>
         </div>
         <div class="video-stage video-placeholder">
@@ -333,7 +341,10 @@ onUnmounted(() => {
 
       <section class="lab-panel trigger-panel">
         <div class="panel-title">
-          <span>Trigger</span>
+          <span class="title-label">
+            <i class="status-dot" :class="daqOnline ? 'online' : 'offline'" aria-hidden="true"></i>
+            Trigger
+          </span>
           <small>{{ status?.sync_timebase ?? "daq_sample_clock" }}</small>
         </div>
         <div class="trigger-metrics">

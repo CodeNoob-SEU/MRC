@@ -6,3 +6,5 @@ frontend/dist-electron/
 runs/
 *.pyc
 __pycache__/
+.download/
+vendor/ffmpeg/windows/

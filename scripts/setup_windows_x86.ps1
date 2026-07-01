@@ -1,5 +1,12 @@
 $ErrorActionPreference = "Stop"
 
+try {
+  & "$PSScriptRoot\setup_ffmpeg_windows.ps1"
+} catch {
+  Write-Warning "Bundled ffmpeg setup failed: $($_.Exception.Message)"
+  Write-Warning "Setup will continue. Trigger recording can still run, but aligned video trimming needs ffmpeg."
+}
+
 function New-X86Venv {
   param(
     [string]$VenvPath = ".venv32"

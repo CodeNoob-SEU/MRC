@@ -596,7 +596,7 @@ class ExperimentCoordinator:
                 "source_file": str(source_video),
             }
 
-        ffmpeg = self.config.ffmpeg_path or shutil.which("ffmpeg")
+        ffmpeg = self._resolve_ffmpeg_executable()
         if not ffmpeg:
             return {
                 "status": "skipped",
@@ -706,6 +706,14 @@ class ExperimentCoordinator:
             "duration_seconds": duration_seconds,
             "errors": errors,
         }
+
+    def _resolve_ffmpeg_executable(self) -> Optional[str]:
+        if self.config.ffmpeg_path:
+            return self.config.ffmpeg_path
+        bundled = self.repo_root / "vendor" / "ffmpeg" / "windows" / "bin" / "ffmpeg.exe"
+        if bundled.exists():
+            return str(bundled)
+        return shutil.which("ffmpeg")
 
     def _build_alignment_metadata(
         self,

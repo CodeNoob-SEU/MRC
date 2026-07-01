@@ -76,6 +76,7 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
     def runtime_diagnostics() -> Dict[str, Any]:
         dxmedia_dll = (repo_root / config.camera.dxmedia_dll).resolve()
         usb3000_dll = (repo_root / config.daq.usb3000_dll).resolve()
+        bundled_ffmpeg = (repo_root / "vendor" / "ffmpeg" / "windows" / "bin" / "ffmpeg.exe").resolve()
         return {
             "python_executable": sys.executable,
             "python_version": sys.version,
@@ -90,6 +91,8 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
             "video_trim_enabled": config.video_trim_enabled,
             "video_trim_mode": config.video_trim_mode,
             "ffmpeg_path": config.ffmpeg_path,
+            "bundled_ffmpeg": str(bundled_ffmpeg),
+            "bundled_ffmpeg_exists": bundled_ffmpeg.exists(),
             "camera_device_index": config.camera.device_index,
             "camera_width": config.camera.width,
             "camera_height": config.camera.height,

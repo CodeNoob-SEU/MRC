@@ -236,6 +236,20 @@ $env:MRC_FFMPEG="C:\Tools\ffmpeg\bin\ffmpeg.exe"
 .\scripts\run_real_windows_x86.ps1
 ```
 
+The Windows setup scripts also install a bundled ffmpeg runtime automatically:
+
+```powershell
+.\scripts\setup_ffmpeg_windows.ps1
+```
+
+That creates:
+
+```text
+vendor\ffmpeg\windows\bin\ffmpeg.exe
+```
+
+The real-mode run scripts prefer this bundled executable when `MRC_FFMPEG` is not already set.
+
 By default trimming uses re-encoding for a more accurate t0 cut, with stream-copy as a fallback. To force faster keyframe-based stream copy:
 
 ```powershell
