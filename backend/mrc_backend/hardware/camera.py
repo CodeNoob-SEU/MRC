@@ -82,6 +82,7 @@ class CameraStatus:
     preview_mode: int = 0
     video_source_status: str = ""
     hd_device: Optional[bool] = None
+    capture_status: str = ""
 
 
 class BaseCamera:
@@ -613,19 +614,78 @@ class DXMediaCamera(BaseCamera):
         self._sync_video_status_on_sdk(self._dll)
         self._set_video_codec_on_sdk(self._dll)
         self._set_audio_codec_on_sdk(self._dll)
-        result = self._dll.DXStartCapture(
-            self._handle,
-            str(output_file).encode("mbcs", errors="replace"),
-            int(self.config.save_audio),
-            None,
-            None,
-            1,
-        )
-        if result != 0:
-            raise CameraError(f"DXStartCapture failed with code {format_sdk_code(result)}")
+        attempts = self._capture_attempts(output_file)
+        errors: List[str] = []
+        active_file = output_file
+        for label, target_file, start_call in attempts:
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            result = start_call(target_file)
+            if result == 0:
+                active_file = target_file
+                self._status.capture_status = f"{label}: ok"
+                break
+            errors.append(f"{label}: {format_sdk_code(result)}")
+            try:
+                self._dll.DXStopCapture(self._handle)
+            except Exception:
+                pass
+        else:
+            self._status.capture_status = "; ".join(errors)
+            raise CameraError(f"DXStartCapture failed; attempts={self._status.capture_status}")
         self._status.recording = True
-        self._status.active_file = str(output_file)
+        self._status.active_file = str(active_file)
         return self.status()
+
+    def _capture_attempts(
+        self,
+        output_file: Path,
+    ) -> List[Tuple[str, Path, Callable[[Path], int]]]:
+        assert self._dll is not None
+
+        def start_capture(save_audio: bool) -> Callable[[Path], int]:
+            def call(path: Path) -> int:
+                return int(
+                    self._dll.DXStartCapture(
+                        self._handle,
+                        str(path).encode("mbcs", errors="replace"),
+                        int(save_audio),
+                        None,
+                        None,
+                        1,
+                    )
+                )
+
+            return call
+
+        def start_capture_ex(file_format: int, save_audio: bool) -> Callable[[Path], int]:
+            def call(path: Path) -> int:
+                return int(
+                    self._dll.DXStartCaptureEx(
+                        self._handle,
+                        str(path).encode("mbcs", errors="replace"),
+                        int(save_audio),
+                        file_format,
+                        None,
+                        None,
+                        None,
+                        1,
+                    )
+                )
+
+            return call
+
+        attempts: List[Tuple[str, Path, Callable[[Path], int]]] = [
+            ("DXStartCapture vc_demo audio", output_file, start_capture(self.config.save_audio)),
+        ]
+        if self.config.save_audio:
+            attempts.append(("DXStartCapture no_audio", output_file, start_capture(False)))
+        attempts.extend(
+            [
+                ("DXStartCaptureEx mp4 no_audio", output_file.with_suffix(".mp4"), start_capture_ex(FILE_MP4, False)),
+                ("DXStartCaptureEx avi no_audio", output_file.with_suffix(".avi"), start_capture_ex(FILE_AVI, False)),
+            ]
+        )
+        return attempts
 
     def stop_recording(self) -> CameraStatus:
         return self._call_sdk(self._stop_recording_on_sdk)

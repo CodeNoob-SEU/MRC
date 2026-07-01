@@ -12,6 +12,8 @@ type HardwareStatus = {
   sample_rate_hz?: number;
   trigger_channel?: number;
   active_file?: string | null;
+  capture_status?: string;
+  video_source_status?: string;
 };
 
 type AppStatus = {
@@ -310,6 +312,7 @@ onUnmounted(() => {
               <span>Camera</span>
               <strong>{{ status?.camera?.mode ?? "-" }} · {{ status?.camera?.recording ? "recording" : "idle" }}</strong>
               <small>{{ status?.camera?.device_name ?? "No device name" }}</small>
+              <small v-if="status?.camera?.capture_status">{{ status.camera.capture_status }}</small>
             </div>
             <div>
               <Usb :size="20" />
