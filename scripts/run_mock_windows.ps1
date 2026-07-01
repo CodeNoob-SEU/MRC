@@ -4,6 +4,9 @@ $env:MRC_BACKEND_PORT = if ($env:MRC_BACKEND_PORT) { $env:MRC_BACKEND_PORT } els
 
 & "$PSScriptRoot\ensure_backend_port_windows.ps1" -Port ([int]$env:MRC_BACKEND_PORT)
 
-Push-Location "$PSScriptRoot\..\frontend"
-npm run dev
-Pop-Location
+try {
+  Push-Location "$PSScriptRoot\..\frontend"
+  npm run dev
+} finally {
+  Pop-Location
+}

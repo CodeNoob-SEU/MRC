@@ -22,6 +22,8 @@ cd mrc_integrated_app
 .\scripts\run_mock_windows.ps1
 ```
 
+Run scripts from the repository root. The scripts temporarily enter `backend/` and `frontend/`, then return to the original directory even if a command fails.
+
 For real hardware mode:
 
 ```powershell

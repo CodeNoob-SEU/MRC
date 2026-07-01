@@ -6,6 +6,9 @@ $env:MRC_DAQ_DEVICE_INDEX = if ($env:MRC_DAQ_DEVICE_INDEX) { $env:MRC_DAQ_DEVICE
 
 & "$PSScriptRoot\ensure_backend_port_windows.ps1" -Port ([int]$env:MRC_BACKEND_PORT)
 
-Push-Location "$PSScriptRoot\..\frontend"
-npm run dev
-Pop-Location
+try {
+  Push-Location "$PSScriptRoot\..\frontend"
+  npm run dev
+} finally {
+  Pop-Location
+}
