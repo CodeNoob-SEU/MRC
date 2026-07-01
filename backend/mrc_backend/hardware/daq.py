@@ -15,6 +15,26 @@ class DaqError(RuntimeError):
     pass
 
 
+USB3000_ERROR_CODES = {
+    -1: "NO_USBDAQ",
+    -2: "DevIndex_Overflow",
+    -3: "Bad_Firmware",
+    -4: "USBDAQ_Closed",
+    -5: "Transfer_Data_Fail",
+    -6: "NO_Enough_Memory",
+    -7: "Time_Out",
+    -8: "Not_Reading",
+    -9: "ChanIndex_Overflow",
+    -10: "Undefined_AiRange",
+    -11: "Undefined_SamplePeriod",
+    -12: "Undefined_AiConnectType",
+    -13: "Undefined_AiSampleMode",
+    -14: "Undefined_WaveLen",
+    -15: "Undefined_Paramter",
+    -16: "USBDAQ_been_Opened",
+}
+
+
 @dataclass(slots=True)
 class DaqStatus:
     mode: str
@@ -183,7 +203,8 @@ class USB3000Daq(BaseDaq):
 
     def _check(self, result: int, operation: str) -> None:
         if result < 0:
-            raise DaqError(f"{operation} failed with code {result}")
+            label = USB3000_ERROR_CODES.get(result, "Unknown")
+            raise DaqError(f"{operation} failed with code {result} ({label})")
 
     def initialize(self) -> DaqStatus:
         dll = self._load()

@@ -17,6 +17,19 @@ class CameraError(RuntimeError):
     pass
 
 
+def signed_u32(value: int) -> int:
+    value = int(value) & 0xFFFFFFFF
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
+def format_sdk_code(value: int) -> str:
+    signed = signed_u32(value)
+    unsigned = int(value) & 0xFFFFFFFF
+    if signed == unsigned:
+        return str(signed)
+    return f"{signed} (unsigned={unsigned}, hex=0x{unsigned:08X})"
+
+
 @dataclass(slots=True)
 class CameraStatus:
     mode: str
@@ -174,14 +187,20 @@ class DXMediaCamera(BaseCamera):
         dll = self._load()
         result = dll.DXInitialize()
         if result != 0:
-            raise CameraError(f"DXInitialize failed with code {result}")
+            raise CameraError(f"DXInitialize failed with code {format_sdk_code(result)}")
         count = int(dll.DXGetDeviceCount())
+        self._status.device_count = count
         if count <= self.config.device_index:
             raise CameraError(f"Camera index {self.config.device_index} unavailable; count={count}")
         err = ctypes.c_uint(0)
         handle = dll.DXOpenDevice(self.config.device_index, ctypes.byref(err))
         if not handle or err.value != 0:
-            raise CameraError(f"DXOpenDevice failed with code {err.value}")
+            raise CameraError(
+                "DXOpenDevice failed with code "
+                f"{format_sdk_code(err.value)}; device_count={count}; "
+                "check that the camera is connected, the vendor demo can open it, "
+                "and no other program is occupying it."
+            )
         self._handle = ctypes.c_void_p(handle)
         name = dll.DXGetDeviceName(self._handle)
         self._status.initialized = True
@@ -197,10 +216,10 @@ class DXMediaCamera(BaseCamera):
             ctypes.c_float(self.config.fps),
         )
         if set_result != 0:
-            raise CameraError(f"DXSetVideoPara failed with code {set_result}")
+            raise CameraError(f"DXSetVideoPara failed with code {format_sdk_code(set_result)}")
         run_result = dll.DXDeviceRunEx(self._handle, False, False)
         if run_result != 0:
-            raise CameraError(f"DXDeviceRunEx failed with code {run_result}")
+            raise CameraError(f"DXDeviceRunEx failed with code {format_sdk_code(run_result)}")
         return self.status()
 
     def start_recording(self, output_file: Path) -> CameraStatus:
@@ -217,7 +236,7 @@ class DXMediaCamera(BaseCamera):
             1,
         )
         if result != 0:
-            raise CameraError(f"DXStartCapture failed with code {result}")
+            raise CameraError(f"DXStartCapture failed with code {format_sdk_code(result)}")
         self._status.recording = True
         self._status.active_file = str(output_file)
         return self.status()
@@ -226,7 +245,7 @@ class DXMediaCamera(BaseCamera):
         if self._dll is not None and self._handle is not None and self._status.recording:
             result = self._dll.DXStopCapture(self._handle)
             if result != 0:
-                raise CameraError(f"DXStopCapture failed with code {result}")
+                raise CameraError(f"DXStopCapture failed with code {format_sdk_code(result)}")
         self._status.recording = False
         return self.status()
 

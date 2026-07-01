@@ -31,6 +31,54 @@ cd mrc_integrated_app
 
 Real mode expects installed camera and USB3000 drivers and 64-bit Python.
 
+## Hardware Diagnostics
+
+After starting real mode, use these commands in another PowerShell window:
+
+```powershell
+curl http://127.0.0.1:8765/status
+curl http://127.0.0.1:8765/diagnostics/hardware
+```
+
+`/diagnostics/hardware` checks the camera and DAQ separately, so one failing device will not hide the other device's status.
+
+Expected successful camera result:
+
+```json
+"camera": {
+  "ok": true,
+  "status": {
+    "mode": "real",
+    "initialized": true,
+    "device_count": 1
+  },
+  "error": null
+}
+```
+
+Expected successful USB3000 result:
+
+```json
+"daq": {
+  "ok": true,
+  "status": {
+    "mode": "real",
+    "initialized": true,
+    "sample_rate_hz": 5000,
+    "trigger_channel": 0
+  },
+  "error": null
+}
+```
+
+If the camera reports `DXOpenDevice failed with code -3 (unsigned=4294967293, hex=0xFFFFFFFD)`, the SDK saw a camera count but could not open the selected device. Check that:
+
+- the vendor camera demo can open the camera;
+- no other program is occupying the camera;
+- the camera driver is installed;
+- the app is running with 64-bit Python;
+- `vendor/camera/x64/` contains the SDK DLL dependencies.
+
 ## Backend
 
 Create the local virtual environment and install runtime dependencies:

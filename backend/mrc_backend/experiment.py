@@ -71,6 +71,29 @@ class ExperimentCoordinator:
                 "daq": asdict(self.daq.status()),
             }
 
+    def diagnostics(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "hardware_mode": self.config.hardware_mode,
+            "camera": {"ok": False, "status": asdict(self.camera.status()), "error": None},
+            "daq": {"ok": False, "status": asdict(self.daq.status()), "error": None},
+        }
+        try:
+            result["camera"]["status"] = asdict(self.camera.initialize())
+            result["camera"]["ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            result["camera"]["status"] = asdict(self.camera.status())
+            result["camera"]["error"] = str(exc)
+
+        try:
+            result["daq"]["status"] = asdict(self.daq.initialize())
+            result["daq"]["ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            result["daq"]["status"] = asdict(self.daq.status())
+            result["daq"]["error"] = str(exc)
+
+        self.event_bus.publish("diagnostics", result)
+        return result
+
     def start_experiment(
         self,
         output_root: str | None = None,

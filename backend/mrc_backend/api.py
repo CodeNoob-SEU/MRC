@@ -4,7 +4,7 @@ from pathlib import Path
 from dataclasses import asdict
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -60,22 +60,35 @@ def create_app(config: AppConfig | None = None, repo_root: Path | None = None) -
     def devices() -> dict[str, Any]:
         return coordinator.devices()
 
+    @app.get("/diagnostics/hardware")
+    def diagnostics() -> dict[str, Any]:
+        return coordinator.diagnostics()
+
     @app.post("/initialize")
     def initialize() -> dict[str, Any]:
-        return asdict(coordinator.initialize())
+        try:
+            return asdict(coordinator.initialize())
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/experiment/start")
     def start_experiment(request: StartExperimentRequest) -> dict[str, Any]:
-        return asdict(coordinator.start_experiment(
-            output_root=request.output_root,
-            window_minutes=request.window_minutes,
-            camera_fps=request.camera_fps,
-            threshold_volts=request.threshold_volts,
-        ))
+        try:
+            return asdict(coordinator.start_experiment(
+                output_root=request.output_root,
+                window_minutes=request.window_minutes,
+                camera_fps=request.camera_fps,
+                threshold_volts=request.threshold_volts,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/experiment/stop")
     def stop_experiment() -> dict[str, Any]:
-        return asdict(coordinator.stop_experiment())
+        try:
+            return asdict(coordinator.stop_experiment())
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.websocket("/ws")
     async def websocket(websocket: WebSocket) -> None:
