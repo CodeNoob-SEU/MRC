@@ -81,6 +81,8 @@ const cameraFps = ref(30);
 const thresholdVolts = ref(2.5);
 const errorMessage = ref("");
 let socket: WebSocket | null = null;
+let latestPreviewSrc = "";
+let previewFrameRequest: number | null = null;
 
 const canStart = computed(() => {
   const state = status.value?.state ?? "idle";
@@ -188,6 +190,18 @@ async function stopExperiment() {
   }
 }
 
+function queuePreviewFrame(src: string) {
+  latestPreviewSrc = src;
+  if (previewFrameRequest !== null) {
+    return;
+  }
+  previewFrameRequest = window.requestAnimationFrame(() => {
+    previewFrameRequest = null;
+    previewSrc.value = latestPreviewSrc;
+    previewError.value = "";
+  });
+}
+
 function connectSocket() {
   socket?.close();
   socket = new WebSocket(wsUrl);
@@ -214,8 +228,7 @@ function connectSocket() {
       waveform.value = payload.points.slice(-120);
     }
     if (event.type === "preview") {
-      previewSrc.value = event.payload.src;
-      previewError.value = "";
+      queuePreviewFrame(event.payload.src);
     }
     if (event.type === "preview_error") {
       previewError.value = event.payload.message;
@@ -252,6 +265,9 @@ onMounted(() => {
 
 onUnmounted(() => {
   socket?.close();
+  if (previewFrameRequest !== null) {
+    window.cancelAnimationFrame(previewFrameRequest);
+  }
 });
 </script>
 
@@ -264,7 +280,7 @@ onUnmounted(() => {
           <small>{{ status?.camera?.recording ? "REC" : "LIVE" }}</small>
         </div>
         <div class="video-stage">
-          <img v-if="previewSrc" :src="previewSrc" alt="Camera preview" />
+          <img v-if="previewSrc" :src="previewSrc" alt="Camera preview" decoding="async" />
           <div v-else class="video-empty">等待相机初始化</div>
           <span v-if="previewError" class="preview-error">{{ previewError }}</span>
         </div>

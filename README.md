@@ -199,6 +199,7 @@ Real camera calls are serialized through one dedicated SDK thread because `DXMed
 - `MRC_CAMERA_VIDEO_CODEC="x264 Codec"`
 - `MRC_CAMERA_VIDEO_SOURCE_INDEX=0` for AV1, `1` for AV2, matching the VC demo's `DXSetVideoSourceEx`
 - `MRC_CAMERA_PREVIEW_MODE=2` for D3D, matching `VCdemoSeting.ini`
+- `MRC_CAMERA_PREVIEW_FPS=12` controls the Electron preview snapshot rate; reduce it to `6` if the PC CPU is weak, or try `15` if the preview is still too sparse.
 
 The Python camera adapter follows the working VC demo order: `DXOpenDevice`, `DXSetVideoSourceEx`, `DXSetVideoPara`, `DXDeviceRunEx`, `DXGetVideoPara`, `DXSetVideoSourceEx` again, then preview via `DXGetBuf`. Recording follows `DeviceControl::StartRecord`: `DXSetVideoCodec`, `DXSetVideoCodecPara`, `DXSetAudioCodec`, `DXStartCapture`.
 

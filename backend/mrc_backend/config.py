@@ -19,6 +19,7 @@ class CameraConfig:
     video_codec: str = "x264 Codec"
     video_source_index: int = 0
     preview_mode: int = 2
+    preview_fps: float = 12.0
     dxmedia_dll: str = "vendor/camera/x64/DXMediaCap.dll"
 
 
@@ -73,6 +74,7 @@ class AppConfig:
             os.getenv("MRC_CAMERA_VIDEO_SOURCE_INDEX", str(config.camera.video_source_index))
         )
         config.camera.preview_mode = int(os.getenv("MRC_CAMERA_PREVIEW_MODE", str(config.camera.preview_mode)))
+        config.camera.preview_fps = float(os.getenv("MRC_CAMERA_PREVIEW_FPS", str(config.camera.preview_fps)))
         config.camera.save_audio = os.getenv("MRC_CAMERA_SAVE_AUDIO", str(config.camera.save_audio)).lower() in {
             "1",
             "true",

@@ -223,7 +223,11 @@ class ExperimentCoordinator:
         self._preview_worker.start()
 
     def _preview_loop(self) -> None:
+        interval_seconds = 1.0 / max(1.0, min(30.0, float(self.config.camera.preview_fps)))
+        last_error_message = ""
+        last_error_at = 0.0
         while not self._preview_stop_event.is_set():
+            started_at = time.monotonic()
             try:
                 frame = self.camera.preview_frame_data_url()
                 if frame:
@@ -235,9 +239,16 @@ class ExperimentCoordinator:
                             "recording": self.camera.status().recording,
                         },
                     )
+                    last_error_message = ""
             except Exception as exc:  # noqa: BLE001
-                self.event_bus.publish("preview_error", {"message": str(exc)})
-            self._preview_stop_event.wait(0.5)
+                message = str(exc)
+                now = time.monotonic()
+                if message != last_error_message or now - last_error_at >= 1.0:
+                    self.event_bus.publish("preview_error", {"message": message})
+                    last_error_message = message
+                    last_error_at = now
+            elapsed_seconds = time.monotonic() - started_at
+            self._preview_stop_event.wait(max(0.0, interval_seconds - elapsed_seconds))
 
     def _set_error(self, message: str) -> None:
         with self._lock:
