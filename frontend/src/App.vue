@@ -501,7 +501,8 @@ onUnmounted(() => {
         </div>
 
         <div class="control-body">
-          <div class="control-column">
+          <div class="control-column params-column">
+            <div class="subsection-title">参数</div>
             <div class="form-grid">
               <label class="output-root-field">
                 <span>输出根目录</span>
@@ -529,7 +530,8 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="control-column">
+          <div class="control-column state-column">
+            <div class="subsection-title">状态</div>
             <div class="status-grid">
               <div class="status-card">
                 <Video :size="18" />

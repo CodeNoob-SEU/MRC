@@ -366,8 +366,9 @@ td {
   min-height: 0;
   margin-top: 8px;
   display: grid;
-  grid-template-columns: minmax(190px, 0.82fr) minmax(300px, 1.18fr);
-  gap: 12px;
+  grid-template-columns: minmax(0, 0.94fr) minmax(0, 1.06fr);
+  gap: 14px;
+  align-items: start;
 }
 
 .control-column {
@@ -377,11 +378,23 @@ td {
   align-content: start;
 }
 
+.subsection-title {
+  height: 18px;
+  color: #596573;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.state-column {
+  border-left: 1px solid #dce2ea;
+  padding-left: 14px;
+}
+
 .form-grid {
-  margin-top: 0;
+  margin-top: 5px;
   display: grid;
   grid-template-columns: 1fr;
-  gap: 7px;
+  gap: 6px;
 }
 
 .output-root-field small {
@@ -428,18 +441,18 @@ input:focus {
 }
 
 .status-grid {
-  margin-top: 0;
+  margin-top: 5px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 9px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px;
 }
 
 .status-card {
   min-width: 0;
-  min-height: 68px;
+  min-height: 58px;
   border: 1px solid #dce2ea;
   border-radius: 6px;
-  padding: 9px;
+  padding: 8px;
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);
   column-gap: 9px;
@@ -475,8 +488,12 @@ input:focus {
 .sync-grid {
   margin-top: 8px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 8px;
+}
+
+.sync-grid div {
+  padding: 7px 9px;
 }
 
 .sdk-log {
@@ -509,6 +526,20 @@ input:focus {
   font-size: 12px;
 }
 
+@media (max-width: 1360px) {
+  .control-body {
+    gap: 10px;
+  }
+
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sync-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 1120px) {
   body {
     min-width: 0;
@@ -539,6 +570,13 @@ input:focus {
   .path-picker,
   .control-actions {
     grid-template-columns: 1fr;
+  }
+
+  .state-column {
+    border-left: 0;
+    border-top: 1px solid #dce2ea;
+    padding-left: 0;
+    padding-top: 10px;
   }
 
   .control-panel {
