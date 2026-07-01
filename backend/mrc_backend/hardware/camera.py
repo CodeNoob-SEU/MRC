@@ -80,6 +80,8 @@ class CameraStatus:
     video_source_index: int = 0
     signal_present: Optional[int] = None
     preview_mode: int = 0
+    video_source_status: str = ""
+    hd_device: Optional[bool] = None
 
 
 class BaseCamera:
@@ -275,6 +277,10 @@ class DXMediaCamera(BaseCamera):
         dll.DXCloseDevice.restype = None
         dll.DXGetDeviceName.argtypes = [ctypes.c_void_p]
         dll.DXGetDeviceName.restype = ctypes.c_char_p
+        dll.DXDeviceIsHD.argtypes = [ctypes.c_void_p]
+        dll.DXDeviceIsHD.restype = ctypes.c_int
+        dll.DXDeviceIsUVC.argtypes = [ctypes.c_void_p]
+        dll.DXDeviceIsUVC.restype = ctypes.c_int
         dll.DXSetVideoPara.argtypes = [
             ctypes.c_void_p,
             ctypes.c_uint,
@@ -428,12 +434,10 @@ class DXMediaCamera(BaseCamera):
         self._status.video_source_index = self.config.video_source_index
         self._status.preview_mode = self.config.preview_mode
 
-        source_result = dll.DXSetVideoSourceEx(self._handle, self.config.video_source_index)
-        if source_result != 0:
-            raise CameraError(
-                "DXSetVideoSourceEx failed with code "
-                f"{format_sdk_code(source_result)}; source_index={self.config.video_source_index}"
-            )
+        hd_device = bool(dll.DXDeviceIsHD(self._handle) or dll.DXDeviceIsUVC(self._handle))
+        self._status.hd_device = hd_device
+        if hd_device:
+            self._try_set_video_source_on_sdk(dll, "before_run")
 
         set_result = dll.DXSetVideoPara(
             self._handle,
@@ -449,13 +453,19 @@ class DXMediaCamera(BaseCamera):
         if run_result != 0:
             raise CameraError(f"DXDeviceRunEx failed with code {format_sdk_code(run_result)}")
         self._sync_video_status_on_sdk(dll)
-        second_source_result = dll.DXSetVideoSourceEx(self._handle, self.config.video_source_index)
-        if second_source_result != 0:
-            raise CameraError(
-                "DXSetVideoSourceEx after run failed with code "
-                f"{format_sdk_code(second_source_result)}; source_index={self.config.video_source_index}"
-            )
+        self._try_set_video_source_on_sdk(dll, "after_run")
+        self._sync_video_status_on_sdk(dll)
         return self.status()
+
+    def _try_set_video_source_on_sdk(self, dll: ctypes.CDLL, phase: str) -> None:
+        if self._handle is None:
+            return
+        result = dll.DXSetVideoSourceEx(self._handle, self.config.video_source_index)
+        status = f"{phase}: DXSetVideoSourceEx({self.config.video_source_index}) -> {format_sdk_code(result)}"
+        if self._status.video_source_status:
+            self._status.video_source_status += "; " + status
+        else:
+            self._status.video_source_status = status
 
     def _sync_video_status_on_sdk(self, dll: ctypes.CDLL) -> None:
         if self._handle is None:
