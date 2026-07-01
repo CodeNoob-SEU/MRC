@@ -222,6 +222,29 @@ The UI supports two recording modes:
 - `Trigger录制`: starts camera recording and DAQ sampling, then uses the first Trigger as t0 for synchronized outputs.
 - `手动录制`: starts and stops camera recording only. It writes the video, `config_snapshot.json`, and `events.jsonl`, but does not write `alignment.json`, `frame_map.csv`, or Trigger tables.
 
+After `Trigger录制` finishes, the backend keeps the original preroll video and tries to create an aligned video whose first frame is the first Trigger t0:
+
+```text
+mrc_recording.mp4
+mrc_recording_aligned.mp4
+```
+
+Automatic trimming uses `ffmpeg`. Install it into `PATH`, or set an explicit path:
+
+```powershell
+$env:MRC_FFMPEG="C:\Tools\ffmpeg\bin\ffmpeg.exe"
+.\scripts\run_real_windows_x86.ps1
+```
+
+By default trimming uses re-encoding for a more accurate t0 cut, with stream-copy as a fallback. To force faster keyframe-based stream copy:
+
+```powershell
+$env:MRC_VIDEO_TRIM_MODE="copy"
+.\scripts\run_real_windows_x86.ps1
+```
+
+If `ffmpeg` is not available, the experiment still completes and records the reason under `alignment.json` -> `video_trim`.
+
 The Windows run scripts use backend port `7876` by default. Before startup, they automatically kill any existing process listening on that port. To override the port:
 
 ```powershell

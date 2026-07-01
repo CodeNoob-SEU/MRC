@@ -17,6 +17,7 @@ class CoordinatorMockTest(unittest.TestCase):
             config = AppConfig()
             config.hardware_mode = "mock"
             config.output_root = temp_dir
+            config.video_trim_enabled = False
             config.window_minutes = 0.001
             config.daq.mock_trigger_interval_seconds = 0.02
             config.daq.batch_points = 50
@@ -44,6 +45,7 @@ class CoordinatorMockTest(unittest.TestCase):
             config = AppConfig()
             config.hardware_mode = "mock"
             config.output_root = temp_dir
+            config.video_trim_enabled = False
             config.window_minutes = 0.002
             config.camera.fps = 30
             config.daq.mock_trigger_interval_seconds = 0.05
@@ -71,6 +73,8 @@ class CoordinatorMockTest(unittest.TestCase):
                 alignment["usable_video_frame_start"] + alignment["expected_total_frames"] - 1,
             )
             self.assertIsNotNone(alignment["stop_overshoot_samples"])
+            self.assertEqual(alignment["video_trim"]["status"], "disabled")
+            self.assertEqual(status.window_remaining_seconds, 0.0)
 
             with (output_dir / "frame_map.csv").open(newline="", encoding="utf-8") as file:
                 frame_rows = list(csv.DictReader(file))

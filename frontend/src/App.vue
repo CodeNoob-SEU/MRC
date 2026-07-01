@@ -24,6 +24,8 @@ type AppStatus = {
   session_id: string | null;
   output_dir: string | null;
   video_file: string | null;
+  aligned_video_file: string | null;
+  video_trim_status: string | null;
   trigger_count: number;
   started_at: string | null;
   first_trigger_at: string | null;
@@ -133,6 +135,15 @@ const remainingWindowLabel = computed(() => {
 });
 
 const outputPath = computed(() => status.value?.output_dir ?? "-");
+const trimStatusLabel = computed(() => {
+  if (status.value?.aligned_video_file) {
+    return "裁剪完成";
+  }
+  if (status.value?.video_trim_status) {
+    return `裁剪: ${status.value.video_trim_status}`;
+  }
+  return status.value?.camera?.preview_status || status.value?.camera?.capture_status || "等待硬件状态";
+});
 
 async function api(path: string, init?: RequestInit) {
   const response = await fetch(`${backendUrl}${path}`, {
@@ -496,7 +507,7 @@ onUnmounted(() => {
 
             <div class="sdk-log">
               <Activity :size="17" />
-              <span>{{ status?.camera?.preview_status || status?.camera?.capture_status || "等待硬件状态" }}</span>
+              <span>{{ trimStatusLabel }}</span>
             </div>
           </div>
         </div>

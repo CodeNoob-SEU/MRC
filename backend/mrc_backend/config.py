@@ -45,6 +45,9 @@ class AppConfig:
     port: int = 7876
     output_root: str = "runs"
     window_minutes: float = 6.0
+    video_trim_enabled: bool = True
+    video_trim_mode: str = "reencode"
+    ffmpeg_path: str = ""
     camera: CameraConfig = field(default_factory=CameraConfig)
     daq: DaqConfig = field(default_factory=DaqConfig)
 
@@ -55,6 +58,12 @@ class AppConfig:
         config.host = os.getenv("MRC_BACKEND_HOST", config.host)
         config.port = int(os.getenv("MRC_BACKEND_PORT", str(config.port)))
         config.output_root = os.getenv("MRC_OUTPUT_ROOT", config.output_root)
+        config.video_trim_enabled = os.getenv(
+            "MRC_VIDEO_TRIM_ENABLED",
+            str(config.video_trim_enabled),
+        ).lower() in {"1", "true", "yes", "on"}
+        config.video_trim_mode = os.getenv("MRC_VIDEO_TRIM_MODE", config.video_trim_mode)
+        config.ffmpeg_path = os.getenv("MRC_FFMPEG", config.ffmpeg_path)
         vendor_arch = os.getenv("MRC_VENDOR_ARCH", "").lower()
         if vendor_arch in {"win32", "x86", "32"}:
             config.camera.dxmedia_dll = "vendor/camera/win32/DXMediaCap.dll"

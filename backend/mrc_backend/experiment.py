@@ -6,7 +6,9 @@ from pathlib import Path
 import csv
 import json
 import logging
+import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 import traceback
@@ -26,6 +28,8 @@ class ExperimentStatus:
     session_id: Optional[str] = None
     output_dir: Optional[str] = None
     video_file: Optional[str] = None
+    aligned_video_file: Optional[str] = None
+    video_trim_status: Optional[str] = None
     trigger_count: int = 0
     started_at: Optional[str] = None
     first_trigger_at: Optional[str] = None
@@ -152,7 +156,8 @@ class ExperimentCoordinator:
             video_file = output_dir / f"mrc_recording{video_suffix}"
 
             camera_start_call_enter_monotonic_ns = time.monotonic_ns()
-            self.camera.start_recording(video_file)
+            camera_status = self.camera.start_recording(video_file)
+            active_video_file = Path(camera_status.active_file or str(video_file))
             camera_recording_started_monotonic_ns = time.monotonic_ns()
             daq_status = self.daq.start_sampling()
             daq_sample0_monotonic_ns = daq_status.sample0_monotonic_ns or time.monotonic_ns()
@@ -167,10 +172,10 @@ class ExperimentCoordinator:
                 recording_mode="trigger",
                 session_id=session_id,
                 output_dir=str(output_dir),
-                video_file=str(video_file),
+                video_file=str(active_video_file),
                 trigger_count=0,
                 started_at=datetime.now().isoformat(timespec="milliseconds"),
-                camera=asdict(self.camera.status()),
+                camera=asdict(camera_status),
                 daq=asdict(self.daq.status()),
                 alignment_file=str(output_dir / "alignment.json"),
                 frame_map_file=str(output_dir / "frame_map.csv"),
@@ -207,15 +212,16 @@ class ExperimentCoordinator:
             video_suffix = ".avi" if self.config.camera.capture_format == 1 else ".mp4"
             video_file = output_dir / f"manual_recording{video_suffix}"
 
-            self.camera.start_recording(video_file)
+            camera_status = self.camera.start_recording(video_file)
+            active_video_file = Path(camera_status.active_file or str(video_file))
             self._status = ExperimentStatus(
                 state="manual_recording",
                 recording_mode="manual",
                 session_id=session_id,
                 output_dir=str(output_dir),
-                video_file=str(video_file),
+                video_file=str(active_video_file),
                 started_at=datetime.now().isoformat(timespec="milliseconds"),
-                camera=asdict(self.camera.status()),
+                camera=asdict(camera_status),
                 daq=asdict(self.daq.status()),
             )
             self._append_jsonl(
@@ -223,7 +229,7 @@ class ExperimentCoordinator:
                 {
                     "type": "manual_recording_started",
                     "payload": {
-                        "video_file": str(video_file),
+                        "video_file": str(active_video_file),
                         "started_at": self._status.started_at,
                     },
                 },
@@ -404,6 +410,7 @@ class ExperimentCoordinator:
                             self._write_alignment(alignment_path, alignment)
                             rel_seconds = 0.0
                             sample_offset = 0
+                            window_remaining = self.config.window_minutes * 60.0
                             frame_index_from_t0 = 1
                             video_frame_index_estimated = int(alignment["video_t0_frame_estimated"])
                             with self._lock:
@@ -415,6 +422,7 @@ class ExperimentCoordinator:
                                 self._status.usable_video_frame_start = int(alignment["usable_video_frame_start"])
                                 self._status.usable_video_frame_end = int(alignment["usable_video_frame_end"])
                                 self._status.preroll_seconds = float(alignment["preroll_seconds"])
+                                self._status.window_remaining_seconds = window_remaining
                         else:
                             assert alignment is not None
                             sample_offset = detection.sample_number - first_trigger_sample
@@ -478,17 +486,25 @@ class ExperimentCoordinator:
                         self.event_bus.publish("trigger", row)
                         self.event_bus.publish("status", self.status_dict())
 
+                    if first_trigger_sample is not None and target_end_sample is not None:
+                        self._update_recording_progress(first_trigger_sample, target_end_sample, global_sample)
+                        self.event_bus.publish("status", self.status_dict())
+
                     if target_end_sample is not None and global_sample >= target_end_sample:
                         stop_overshoot_samples = max(0, global_sample - target_end_sample)
                         if alignment is not None:
                             alignment["stop_overshoot_samples"] = stop_overshoot_samples
                             alignment["stop_overshoot_seconds"] = stop_overshoot_samples / self.config.daq.sample_rate_hz
                             alignment["finished_at_log_time"] = datetime.now().isoformat(timespec="milliseconds")
-                            self._write_alignment(alignment_path, alignment)
                         with self._lock:
                             self._status.stop_overshoot_samples = stop_overshoot_samples
+                            self._status.video_trim_status = "trimming"
                             self._set_finished_locked("finished")
                         self.event_bus.publish("status", self.status_dict())
+                        if alignment is not None:
+                            self._finalize_aligned_video(alignment_path, alignment)
+                            self._write_alignment(alignment_path, alignment)
+                            self.event_bus.publish("status", self.status_dict())
                         return
         except Exception as exc:  # noqa: BLE001
             self._logger.error("Acquisition loop failed: %s", exc)
@@ -510,6 +526,186 @@ class ExperimentCoordinator:
             "points": samples[:: max(1, len(samples) // 80)],
         }
         self.event_bus.publish("waveform", payload)
+
+    def _update_recording_progress(
+        self,
+        first_trigger_sample: int,
+        target_end_sample: int,
+        global_sample: int,
+    ) -> None:
+        current_sample = min(global_sample, target_end_sample)
+        elapsed_seconds = max(
+            0.0,
+            (current_sample - first_trigger_sample) / self.config.daq.sample_rate_hz,
+        )
+        remaining_seconds = max(
+            0.0,
+            (target_end_sample - current_sample) / self.config.daq.sample_rate_hz,
+        )
+        with self._lock:
+            self._status.elapsed_seconds = elapsed_seconds
+            self._status.window_remaining_seconds = remaining_seconds
+            self._status.t0_locked = True
+
+    def _finalize_aligned_video(self, alignment_path: Path, alignment: Dict[str, Any]) -> None:
+        source_text = self.status().video_file
+        if not source_text:
+            trim_result = {
+                "status": "skipped",
+                "reason": "source video path is missing",
+            }
+        else:
+            source_video = Path(source_text)
+            alignment["files"]["source_video"] = source_video.name
+            output_video = source_video.with_name(f"{source_video.stem}_aligned{source_video.suffix}")
+            trim_result = self._trim_video_from_t0(
+                source_video=source_video,
+                output_video=output_video,
+                start_seconds=max(0.0, float(alignment["preroll_seconds"])),
+                duration_seconds=float(alignment["window_seconds"]),
+            )
+
+        alignment["video_trim"] = trim_result
+        if trim_result.get("status") == "ok":
+            alignment["files"]["aligned_video"] = Path(str(trim_result["output_file"])).name
+            with self._lock:
+                self._status.aligned_video_file = str(trim_result["output_file"])
+                self._status.video_trim_status = "ok"
+        else:
+            with self._lock:
+                self._status.video_trim_status = str(trim_result.get("status", "failed"))
+        self._append_jsonl(
+            alignment_path.with_name("events.jsonl"),
+            {"type": "video_trim", "payload": trim_result},
+        )
+
+    def _trim_video_from_t0(
+        self,
+        *,
+        source_video: Path,
+        output_video: Path,
+        start_seconds: float,
+        duration_seconds: float,
+    ) -> Dict[str, Any]:
+        if not self.config.video_trim_enabled:
+            return {"status": "disabled", "reason": "MRC_VIDEO_TRIM_ENABLED is false"}
+        if not source_video.exists() or source_video.stat().st_size == 0:
+            return {
+                "status": "skipped",
+                "reason": "source video does not exist or is empty",
+                "source_file": str(source_video),
+            }
+
+        ffmpeg = self.config.ffmpeg_path or shutil.which("ffmpeg")
+        if not ffmpeg:
+            return {
+                "status": "skipped",
+                "reason": "ffmpeg was not found; install ffmpeg or set MRC_FFMPEG",
+                "source_file": str(source_video),
+                "planned_output_file": str(output_video),
+                "start_seconds": start_seconds,
+                "duration_seconds": duration_seconds,
+            }
+
+        mode = self.config.video_trim_mode.lower()
+        commands: List[tuple[str, List[str]]] = []
+        if mode in {"copy", "stream_copy"}:
+            commands.append((
+                "copy",
+                [
+                    ffmpeg,
+                    "-y",
+                    "-ss",
+                    f"{start_seconds:.6f}",
+                    "-i",
+                    str(source_video),
+                    "-t",
+                    f"{duration_seconds:.6f}",
+                    "-c",
+                    "copy",
+                    str(output_video),
+                ],
+            ))
+        else:
+            commands.append((
+                "reencode",
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(source_video),
+                    "-ss",
+                    f"{start_seconds:.6f}",
+                    "-t",
+                    f"{duration_seconds:.6f}",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "18",
+                    "-c:a",
+                    "copy",
+                    str(output_video),
+                ],
+            ))
+            commands.append((
+                "copy_fallback",
+                [
+                    ffmpeg,
+                    "-y",
+                    "-ss",
+                    f"{start_seconds:.6f}",
+                    "-i",
+                    str(source_video),
+                    "-t",
+                    f"{duration_seconds:.6f}",
+                    "-c",
+                    "copy",
+                    str(output_video),
+                ],
+            ))
+
+        errors: List[Dict[str, Any]] = []
+        for label, command in commands:
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=900,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append({"mode": label, "error": str(exc)})
+                continue
+
+            if completed.returncode == 0 and output_video.exists() and output_video.stat().st_size > 0:
+                return {
+                    "status": "ok",
+                    "mode": label,
+                    "source_file": str(source_video),
+                    "output_file": str(output_video),
+                    "start_seconds": start_seconds,
+                    "duration_seconds": duration_seconds,
+                    "command": command,
+                }
+            errors.append(
+                {
+                    "mode": label,
+                    "returncode": completed.returncode,
+                    "stderr_tail": completed.stderr[-2000:],
+                }
+            )
+
+        return {
+            "status": "failed",
+            "source_file": str(source_video),
+            "planned_output_file": str(output_video),
+            "start_seconds": start_seconds,
+            "duration_seconds": duration_seconds,
+            "errors": errors,
+        }
 
     def _build_alignment_metadata(
         self,
@@ -569,6 +765,7 @@ class ExperimentCoordinator:
                 "frame_map": "frame_map.csv",
                 "triggers": "triggers.csv",
                 "trigger_db": "triggers.sqlite3",
+                "source_video": "mrc_recording.mp4" if self.config.camera.capture_format == 2 else "mrc_recording.avi",
             },
         }
 
