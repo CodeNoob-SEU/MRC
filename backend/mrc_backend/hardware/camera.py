@@ -400,6 +400,9 @@ class DXMediaCamera(BaseCamera):
     def _initialize_on_sdk(self) -> CameraStatus:
         dll = self._load()
         self._ensure_com_initialized()
+        if self._handle is not None and self._status.initialized:
+            self._sync_video_status_on_sdk(dll)
+            return self.status()
         result = dll.DXInitialize()
         if result != 0:
             raise CameraError(f"DXInitialize failed with code {format_sdk_code(result)}")
@@ -453,7 +456,7 @@ class DXMediaCamera(BaseCamera):
         if run_result != 0:
             raise CameraError(f"DXDeviceRunEx failed with code {format_sdk_code(run_result)}")
         self._sync_video_status_on_sdk(dll)
-        self._try_set_video_source_on_sdk(dll, "after_run")
+        self._scan_video_sources_on_sdk(dll)
         self._sync_video_status_on_sdk(dll)
         return self.status()
 
@@ -466,6 +469,31 @@ class DXMediaCamera(BaseCamera):
             self._status.video_source_status += "; " + status
         else:
             self._status.video_source_status = status
+
+    def _scan_video_sources_on_sdk(self, dll: ctypes.CDLL) -> None:
+        if self._handle is None:
+            return
+        candidates = [self.config.video_source_index, 0, 1, 2]
+        seen: Set[int] = set()
+        for source_index in candidates:
+            if source_index in seen:
+                continue
+            seen.add(source_index)
+            result = dll.DXSetVideoSourceEx(self._handle, source_index)
+            time.sleep(0.15)
+            self._sync_video_status_on_sdk(dll)
+            status = (
+                f"scan: DXSetVideoSourceEx({source_index}) -> {format_sdk_code(result)}, "
+                f"signal={self._status.signal_present}"
+            )
+            if self._status.video_source_status:
+                self._status.video_source_status += "; " + status
+            else:
+                self._status.video_source_status = status
+            if result == 0:
+                self._status.video_source_index = source_index
+                if self._status.signal_present == 1:
+                    break
 
     def _sync_video_status_on_sdk(self, dll: ctypes.CDLL) -> None:
         if self._handle is None:
