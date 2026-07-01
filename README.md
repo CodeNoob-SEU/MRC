@@ -44,6 +44,44 @@ curl http://127.0.0.1:7876/diagnostics/hardware
 
 `/diagnostics/hardware` checks the camera and DAQ separately, so one failing device will not hide the other device's status.
 
+## Standalone Camera Probe
+
+If the camera opens but the Electron preview does not show a valid image, run the standalone camera probe with the app closed:
+
+```powershell
+git pull
+.\scripts\camera_probe_windows_x86.ps1
+```
+
+The probe uses `backend\.venv32` and the committed win32 `DXMediaCap.dll` by default. It tests multiple SDK paths:
+
+- `DXSnapToJPGFile`
+- `DXGetFrameBuffer` + `DXSaveJPGFile`
+- `DXGetBuf` + `DXSaveJPGFile`
+- `DXStartRawVideoCallback` + `DXSaveJPGFile`
+- hidden-window `DXStartPreview` modes followed by snapshot
+- short MP4 and AVI capture
+
+It also tries common PAL profiles, including the vendor demo's `768x576 @ 25 fps` setting. Results are written to:
+
+```text
+camera_probe_output\
+```
+
+Open the generated JPG files and find the first one that shows a correct camera image. Then check `camera_probe_output\camera_probe_report.json` for the matching profile and strategy name.
+
+To test only one profile:
+
+```powershell
+.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 768 --height 576 --fps 25 --colorspace 2
+```
+
+To stop after the first non-empty candidate file:
+
+```powershell
+.\scripts\camera_probe_windows_x86.ps1 --stop-on-first
+```
+
 Expected successful camera result:
 
 ```json
