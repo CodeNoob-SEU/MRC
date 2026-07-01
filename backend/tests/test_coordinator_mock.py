@@ -120,6 +120,28 @@ class CoordinatorMockTest(unittest.TestCase):
         )
         self.assertEqual(alignment["expected_total_frames"], 10800)
 
+    def test_manual_recording_only_controls_camera(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = AppConfig()
+            config.hardware_mode = "mock"
+            config.output_root = temp_dir
+            coordinator = ExperimentCoordinator(config, Path.cwd(), EventBus())
+            coordinator.initialize()
+
+            status = coordinator.start_manual_recording()
+            self.assertEqual(status.state, "manual_recording")
+            self.assertEqual(status.recording_mode, "manual")
+            self.assertTrue(status.camera["recording"])
+            output_dir = Path(status.output_dir or "")
+            self.assertTrue((output_dir / "manual_recording.mp4").exists())
+            self.assertFalse((output_dir / "triggers.csv").exists())
+            self.assertFalse((output_dir / "alignment.json").exists())
+
+            status = coordinator.stop_experiment()
+            self.assertEqual(status.state, "manual_stopped")
+            self.assertFalse(status.camera["recording"])
+            coordinator.close()
+
 
 if __name__ == "__main__":
     unittest.main()

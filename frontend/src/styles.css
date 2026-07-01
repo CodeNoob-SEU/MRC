@@ -262,7 +262,7 @@ td {
 
 .control-panel {
   padding-bottom: 12px;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
   overflow: hidden;
 }
 
@@ -284,8 +284,45 @@ td {
   font-size: 13px;
 }
 
+.mode-toggle {
+  margin-top: 8px;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.mode-toggle > span {
+  color: #596573;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.mode-toggle > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.mode-toggle button {
+  height: 32px;
+  padding: 0 10px;
+  border-color: #d3dae2;
+  background: #f8fafb;
+  font-size: 13px;
+}
+
+.mode-toggle button.active {
+  border-color: #1f6f62;
+  background: rgba(31, 111, 98, 0.1);
+  color: #155449;
+  font-weight: 700;
+}
+
 .control-actions {
-  margin-top: 10px;
+  margin-top: 8px;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
@@ -293,7 +330,7 @@ td {
 
 .control-body {
   min-height: 0;
-  margin-top: 10px;
+  margin-top: 8px;
   display: grid;
   grid-template-columns: minmax(190px, 0.82fr) minmax(300px, 1.18fr);
   gap: 12px;
@@ -310,7 +347,7 @@ td {
   margin-top: 0;
   display: grid;
   grid-template-columns: 1fr;
-  gap: 9px;
+  gap: 7px;
 }
 
 label span {
@@ -381,16 +418,16 @@ input:focus {
 }
 
 .sync-grid {
-  margin-top: 10px;
+  margin-top: 8px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 9px;
+  gap: 8px;
 }
 
 .output-box,
 .sdk-log {
   min-width: 0;
-  margin-top: 10px;
+  margin-top: 8px;
   border: 1px solid #dce2ea;
   border-radius: 6px;
   padding: 8px 10px;
@@ -454,6 +491,8 @@ input:focus {
   .status-grid,
   .control-body,
   .form-grid,
+  .mode-toggle,
+  .mode-toggle > div,
   .control-actions {
     grid-template-columns: 1fr;
   }

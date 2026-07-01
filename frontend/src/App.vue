@@ -20,6 +20,7 @@ type HardwareStatus = {
 
 type AppStatus = {
   state: string;
+  recording_mode: string;
   session_id: string | null;
   output_dir: string | null;
   video_file: string | null;
@@ -80,6 +81,7 @@ const windowMinutes = ref(6);
 const cameraFps = ref(30);
 const thresholdVolts = ref(2.5);
 const errorMessage = ref("");
+const recordingMode = ref<"trigger" | "manual">("trigger");
 let socket: WebSocket | null = null;
 let latestPreviewSrc = "";
 let previewFrameRequest: number | null = null;
@@ -91,7 +93,7 @@ const canStart = computed(() => {
 
 const canStop = computed(() => {
   const state = status.value?.state ?? "idle";
-  return !busy.value && ["armed", "recording"].includes(state);
+  return !busy.value && ["armed", "recording", "manual_recording"].includes(state);
 });
 
 const stateLabel = computed(() => {
@@ -100,6 +102,8 @@ const stateLabel = computed(() => {
     idle: "待机",
     armed: "等待 Trigger",
     recording: "采集中",
+    manual_recording: "手动录制中",
+    manual_stopped: "手动已停止",
     finished: "完成",
     stopped: "已停止",
     error: "错误"
@@ -169,6 +173,25 @@ async function startExperiment() {
         window_minutes: windowMinutes.value,
         camera_fps: cameraFps.value,
         threshold_volts: thresholdVolts.value
+      })
+    });
+  } catch (error) {
+    errorMessage.value = String(error);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function startManualRecording() {
+  busy.value = true;
+  errorMessage.value = "";
+  triggers.value = [];
+  try {
+    status.value = await api("/manual-recording/start", {
+      method: "POST",
+      body: JSON.stringify({
+        output_root: outputRoot.value,
+        camera_fps: cameraFps.value
       })
     });
   } catch (error) {
@@ -351,7 +374,7 @@ onUnmounted(() => {
       <section class="lab-panel control-panel">
         <div class="panel-title">
           <span>参数设置 / 系统状态 / 开关</span>
-          <small>{{ stateLabel }} · {{ connection }}</small>
+          <small>{{ recordingMode === "trigger" ? "Trigger模式" : "手动模式" }} · {{ stateLabel }} · {{ connection }}</small>
         </div>
 
         <section v-if="errorMessage || status?.last_error" class="alert">
@@ -359,14 +382,48 @@ onUnmounted(() => {
           <span>{{ errorMessage || status?.last_error }}</span>
         </section>
 
+        <div class="mode-toggle">
+          <span>录制模式</span>
+          <div>
+            <button
+              :class="{ active: recordingMode === 'trigger' }"
+              :disabled="!canStart"
+              @click="recordingMode = 'trigger'"
+            >
+              Trigger录制
+            </button>
+            <button
+              :class="{ active: recordingMode === 'manual' }"
+              :disabled="!canStart"
+              @click="recordingMode = 'manual'"
+            >
+              手动录制
+            </button>
+          </div>
+        </div>
+
         <div class="control-actions">
           <button class="secondary" :disabled="busy" @click="initialize">
             <RotateCw :size="17" />
             初始化
           </button>
-          <button class="primary" :disabled="!canStart" @click="startExperiment">
+          <button
+            v-if="recordingMode === 'trigger'"
+            class="primary"
+            :disabled="!canStart"
+            @click="startExperiment"
+          >
             <Play :size="17" />
-            开始
+            开始Trigger
+          </button>
+          <button
+            v-else
+            class="primary"
+            :disabled="!canStart"
+            @click="startManualRecording"
+          >
+            <Play :size="17" />
+            手动录制
           </button>
           <button class="danger" :disabled="!canStop" @click="stopExperiment">
             <Square :size="17" />

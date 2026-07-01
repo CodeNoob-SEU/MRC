@@ -217,6 +217,11 @@ $env:MRC_CAMERA_CAPTURE_FORMAT="1"
 .\scripts\run_real_windows_x86.ps1
 ```
 
+The UI supports two recording modes:
+
+- `Trigger录制`: starts camera recording and DAQ sampling, then uses the first Trigger as t0 for synchronized outputs.
+- `手动录制`: starts and stops camera recording only. It writes the video, `config_snapshot.json`, and `events.jsonl`, but does not write `alignment.json`, `frame_map.csv`, or Trigger tables.
+
 The Windows run scripts use backend port `7876` by default. Before startup, they automatically kill any existing process listening on that port. To override the port:
 
 ```powershell

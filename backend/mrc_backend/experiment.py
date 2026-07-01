@@ -22,6 +22,7 @@ from .hardware.daq import BaseDaq, DaqStatus, TriggerDetector, build_daq
 @dataclass
 class ExperimentStatus:
     state: str = "idle"
+    recording_mode: str = "trigger"
     session_id: Optional[str] = None
     output_dir: Optional[str] = None
     video_file: Optional[str] = None
@@ -131,7 +132,7 @@ class ExperimentCoordinator:
         threshold_volts: Optional[float] = None,
     ) -> ExperimentStatus:
         with self._lock:
-            if self._status.state in {"armed", "recording"}:
+            if self._status.state in {"armed", "recording", "manual_recording"}:
                 raise RuntimeError("Experiment is already running.")
             if camera_fps is not None:
                 self.config.camera.fps = float(camera_fps)
@@ -163,6 +164,7 @@ class ExperimentCoordinator:
             self._stop_event.clear()
             self._status = ExperimentStatus(
                 state="armed",
+                recording_mode="trigger",
                 session_id=session_id,
                 output_dir=str(output_dir),
                 video_file=str(video_file),
@@ -183,6 +185,52 @@ class ExperimentCoordinator:
         self.event_bus.publish("status", self.status_dict())
         return self.status()
 
+    def start_manual_recording(
+        self,
+        output_root: Optional[str] = None,
+        camera_fps: Optional[float] = None,
+    ) -> ExperimentStatus:
+        with self._lock:
+            if self._status.state in {"armed", "recording", "manual_recording"}:
+                raise RuntimeError("Experiment is already running.")
+            if camera_fps is not None:
+                self.config.camera.fps = float(camera_fps)
+            root = Path(output_root or self.config.output_root)
+            if not root.is_absolute():
+                root = (self.repo_root / root).resolve()
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
+            output_dir = root / session_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self.config.write_snapshot(output_dir / "config_snapshot.json")
+            events_path = output_dir / "events.jsonl"
+            events_path.write_text("", encoding="utf-8")
+            video_suffix = ".avi" if self.config.camera.capture_format == 1 else ".mp4"
+            video_file = output_dir / f"manual_recording{video_suffix}"
+
+            self.camera.start_recording(video_file)
+            self._status = ExperimentStatus(
+                state="manual_recording",
+                recording_mode="manual",
+                session_id=session_id,
+                output_dir=str(output_dir),
+                video_file=str(video_file),
+                started_at=datetime.now().isoformat(timespec="milliseconds"),
+                camera=asdict(self.camera.status()),
+                daq=asdict(self.daq.status()),
+            )
+            self._append_jsonl(
+                events_path,
+                {
+                    "type": "manual_recording_started",
+                    "payload": {
+                        "video_file": str(video_file),
+                        "started_at": self._status.started_at,
+                    },
+                },
+            )
+        self.event_bus.publish("status", self.status_dict())
+        return self.status()
+
     def stop_experiment(self) -> ExperimentStatus:
         worker: Optional[threading.Thread]
         with self._lock:
@@ -193,6 +241,11 @@ class ExperimentCoordinator:
         with self._lock:
             if self._status.state in {"armed", "recording"}:
                 self._set_finished_locked("stopped")
+            elif self._status.state == "manual_recording":
+                self.camera.stop_recording()
+                self._status.state = "manual_stopped"
+                self._status.camera = asdict(self.camera.status())
+                self._status.daq = asdict(self.daq.status())
         self.event_bus.publish("status", self.status_dict())
         return self.status()
 

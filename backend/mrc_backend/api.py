@@ -23,6 +23,11 @@ class StartExperimentRequest(BaseModel):
     threshold_volts: Optional[float] = None
 
 
+class StartManualRecordingRequest(BaseModel):
+    output_root: Optional[str] = None
+    camera_fps: Optional[float] = None
+
+
 def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = None) -> FastAPI:
     config = config or AppConfig.from_env()
     repo_root = repo_root or Path(__file__).resolve().parents[2]
@@ -124,6 +129,16 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
     def stop_experiment() -> Dict[str, Any]:
         try:
             return asdict(coordinator.stop_experiment())
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/manual-recording/start")
+    def start_manual_recording(request: StartManualRecordingRequest) -> Dict[str, Any]:
+        try:
+            return asdict(coordinator.start_manual_recording(
+                output_root=request.output_root,
+                camera_fps=request.camera_fps,
+            ))
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
