@@ -1,3 +1,6 @@
+import csv
+import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -5,7 +8,7 @@ from pathlib import Path
 
 from mrc_backend.config import AppConfig
 from mrc_backend.events import EventBus
-from mrc_backend.experiment import ExperimentCoordinator
+from mrc_backend.experiment import ExperimentCoordinator, SyncStartContext
 
 
 class CoordinatorMockTest(unittest.TestCase):
@@ -35,6 +38,87 @@ class CoordinatorMockTest(unittest.TestCase):
             self.assertTrue((output_dir / "triggers.sqlite3").exists())
             self.assertTrue((output_dir / "config_snapshot.json").exists())
             coordinator.close()
+
+    def test_alignment_outputs_are_based_on_first_trigger_t0(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = AppConfig()
+            config.hardware_mode = "mock"
+            config.output_root = temp_dir
+            config.window_minutes = 0.002
+            config.camera.fps = 30
+            config.daq.mock_trigger_interval_seconds = 0.05
+            config.daq.batch_points = 50
+            coordinator = ExperimentCoordinator(config, Path.cwd(), EventBus())
+            coordinator.initialize()
+            status = coordinator.start_experiment()
+
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                status = coordinator.status()
+                if status.state == "finished":
+                    break
+                time.sleep(0.02)
+
+            self.assertEqual(status.state, "finished")
+            output_dir = Path(status.output_dir or "")
+            alignment = json.loads((output_dir / "alignment.json").read_text(encoding="utf-8"))
+            self.assertEqual(alignment["timebase"], "daq_sample_clock")
+            self.assertEqual(alignment["t0_sample_number"], 250)
+            self.assertGreater(alignment["video_t0_frame_estimated"], 1)
+            self.assertEqual(alignment["expected_total_frames"], round(0.002 * 60 * 30))
+            self.assertEqual(
+                alignment["usable_video_frame_end"],
+                alignment["usable_video_frame_start"] + alignment["expected_total_frames"] - 1,
+            )
+            self.assertIsNotNone(alignment["stop_overshoot_samples"])
+
+            with (output_dir / "frame_map.csv").open(newline="", encoding="utf-8") as file:
+                frame_rows = list(csv.DictReader(file))
+            self.assertEqual(len(frame_rows), alignment["expected_total_frames"])
+            self.assertEqual(int(frame_rows[0]["relative_frame_index"]), 1)
+            self.assertEqual(
+                int(frame_rows[0]["video_frame_index_estimated"]),
+                alignment["usable_video_frame_start"],
+            )
+
+            with (output_dir / "triggers.csv").open(newline="", encoding="utf-8") as file:
+                trigger_rows = list(csv.DictReader(file))
+            self.assertGreaterEqual(len(trigger_rows), 2)
+            self.assertEqual(int(trigger_rows[0]["sample_offset_from_t0"]), 0)
+            self.assertEqual(int(trigger_rows[0]["frame_index_from_t0"]), 1)
+            self.assertEqual(
+                int(trigger_rows[0]["video_frame_index_estimated"]),
+                alignment["video_t0_frame_estimated"],
+            )
+            second_sample_offset = int(trigger_rows[1]["sample_offset_from_t0"])
+            expected_second_frame = 1 + round(second_sample_offset / config.daq.sample_rate_hz * config.camera.fps)
+            self.assertEqual(int(trigger_rows[1]["frame_index_from_t0"]), expected_second_frame)
+            self.assertEqual(trigger_rows[0]["timebase"], "daq_sample_clock")
+
+            with sqlite3.connect(output_dir / "triggers.sqlite3") as db:
+                db_row = db.execute(
+                    "select sample_offset_from_t0, frame_index_from_t0, video_frame_index_estimated, timebase "
+                    "from triggers order by trigger_index limit 1"
+                ).fetchone()
+            self.assertEqual(db_row, (0, 1, alignment["video_t0_frame_estimated"], "daq_sample_clock"))
+            coordinator.close()
+
+    def test_six_minute_window_expected_total_frames(self) -> None:
+        config = AppConfig()
+        config.hardware_mode = "mock"
+        config.window_minutes = 6
+        config.camera.fps = 30
+        coordinator = ExperimentCoordinator(config, Path.cwd(), EventBus())
+        alignment = coordinator._build_alignment_metadata(
+            SyncStartContext(
+                camera_start_call_enter_monotonic_ns=0,
+                camera_recording_started_monotonic_ns=0,
+                daq_sample0_monotonic_ns=0,
+            ),
+            t0_sample_number=0,
+            output_dir=Path.cwd(),
+        )
+        self.assertEqual(alignment["expected_total_frames"], 10800)
 
 
 if __name__ == "__main__":

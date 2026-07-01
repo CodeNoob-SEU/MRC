@@ -8,6 +8,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import traceback
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -32,6 +33,23 @@ class ExperimentStatus:
     last_error: Optional[str] = None
     camera: Optional[Dict[str, Any]] = None
     daq: Optional[Dict[str, Any]] = None
+    sync_timebase: str = "daq_sample_clock"
+    t0_locked: bool = False
+    expected_total_frames: Optional[int] = None
+    video_t0_frame_estimated: Optional[int] = None
+    usable_video_frame_start: Optional[int] = None
+    usable_video_frame_end: Optional[int] = None
+    preroll_seconds: Optional[float] = None
+    stop_overshoot_samples: Optional[int] = None
+    alignment_file: Optional[str] = None
+    frame_map_file: Optional[str] = None
+
+
+@dataclass
+class SyncStartContext:
+    camera_start_call_enter_monotonic_ns: int
+    camera_recording_started_monotonic_ns: int
+    daq_sample0_monotonic_ns: int
 
 
 class ExperimentCoordinator:
@@ -132,8 +150,16 @@ class ExperimentCoordinator:
             video_suffix = ".avi" if self.config.camera.capture_format == 1 else ".mp4"
             video_file = output_dir / f"mrc_recording{video_suffix}"
 
+            camera_start_call_enter_monotonic_ns = time.monotonic_ns()
             self.camera.start_recording(video_file)
-            self.daq.start_sampling()
+            camera_recording_started_monotonic_ns = time.monotonic_ns()
+            daq_status = self.daq.start_sampling()
+            daq_sample0_monotonic_ns = daq_status.sample0_monotonic_ns or time.monotonic_ns()
+            sync_context = SyncStartContext(
+                camera_start_call_enter_monotonic_ns=camera_start_call_enter_monotonic_ns,
+                camera_recording_started_monotonic_ns=camera_recording_started_monotonic_ns,
+                daq_sample0_monotonic_ns=daq_sample0_monotonic_ns,
+            )
             self._stop_event.clear()
             self._status = ExperimentStatus(
                 state="armed",
@@ -144,10 +170,12 @@ class ExperimentCoordinator:
                 started_at=datetime.now().isoformat(timespec="milliseconds"),
                 camera=asdict(self.camera.status()),
                 daq=asdict(self.daq.status()),
+                alignment_file=str(output_dir / "alignment.json"),
+                frame_map_file=str(output_dir / "frame_map.csv"),
             )
             self._worker = threading.Thread(
                 target=self._acquisition_loop,
-                args=(output_dir,),
+                args=(output_dir, sync_context),
                 name="mrc-acquisition",
                 daemon=True,
             )
@@ -230,10 +258,12 @@ class ExperimentCoordinator:
         self._status.daq = asdict(self.daq.status())
         self._worker = None
 
-    def _acquisition_loop(self, output_dir: Path) -> None:
+    def _acquisition_loop(self, output_dir: Path, sync_context: SyncStartContext) -> None:
         trigger_csv = output_dir / "triggers.csv"
         db_path = output_dir / "triggers.sqlite3"
         events_path = output_dir / "events.jsonl"
+        alignment_path = output_dir / "alignment.json"
+        frame_map_path = output_dir / "frame_map.csv"
         detector = TriggerDetector(
             threshold=self.config.daq.threshold_volts,
             debounce_seconds=self.config.daq.debounce_seconds,
@@ -241,7 +271,8 @@ class ExperimentCoordinator:
         )
         global_sample = 0
         first_trigger_sample: Optional[int] = None
-        end_sample: Optional[int] = None
+        target_end_sample: Optional[int] = None
+        alignment: Optional[Dict[str, Any]] = None
 
         try:
             with trigger_csv.open("w", newline="", encoding="utf-8") as csv_file, sqlite3.connect(db_path) as db:
@@ -255,6 +286,10 @@ class ExperimentCoordinator:
                         "frame_index",
                         "window_remaining",
                         "frame_mapping_mode",
+                        "sample_offset_from_t0",
+                        "frame_index_from_t0",
+                        "video_frame_index_estimated",
+                        "timebase",
                     ],
                 )
                 writer.writeheader()
@@ -267,7 +302,11 @@ class ExperimentCoordinator:
                         sample_number integer not null,
                         frame_index integer not null,
                         window_remaining real not null,
-                        frame_mapping_mode text not null
+                        frame_mapping_mode text not null,
+                        sample_offset_from_t0 integer not null,
+                        frame_index_from_t0 integer not null,
+                        video_frame_index_estimated integer not null,
+                        timebase text not null
                     )
                     """
                 )
@@ -284,26 +323,52 @@ class ExperimentCoordinator:
                         now = datetime.now()
                         if first_trigger_sample is None:
                             first_trigger_sample = detection.sample_number
-                            end_sample = first_trigger_sample + int(
-                                self.config.window_minutes * 60 * self.config.daq.sample_rate_hz
+                            alignment = self._build_alignment_metadata(
+                                sync_context=sync_context,
+                                t0_sample_number=first_trigger_sample,
+                                output_dir=output_dir,
                             )
+                            target_end_sample = int(alignment["target_end_sample"])
+                            self._write_frame_map(
+                                frame_map_path,
+                                t0_sample_number=first_trigger_sample,
+                                expected_total_frames=int(alignment["expected_total_frames"]),
+                                usable_video_frame_start=int(alignment["usable_video_frame_start"]),
+                                effective_fps=float(alignment["effective_fps"]),
+                                sample_rate_hz=self.config.daq.sample_rate_hz,
+                            )
+                            self._write_alignment(alignment_path, alignment)
                             rel_seconds = 0.0
-                            frame_index = 1
+                            sample_offset = 0
+                            frame_index_from_t0 = 1
+                            video_frame_index_estimated = int(alignment["video_t0_frame_estimated"])
                             with self._lock:
                                 self._status.state = "recording"
                                 self._status.first_trigger_at = now.isoformat(timespec="milliseconds")
+                                self._status.t0_locked = True
+                                self._status.expected_total_frames = int(alignment["expected_total_frames"])
+                                self._status.video_t0_frame_estimated = int(alignment["video_t0_frame_estimated"])
+                                self._status.usable_video_frame_start = int(alignment["usable_video_frame_start"])
+                                self._status.usable_video_frame_end = int(alignment["usable_video_frame_end"])
+                                self._status.preroll_seconds = float(alignment["preroll_seconds"])
                         else:
+                            assert alignment is not None
+                            sample_offset = detection.sample_number - first_trigger_sample
                             rel_seconds = (
-                                detection.sample_number - first_trigger_sample
+                                sample_offset
                             ) / self.config.daq.sample_rate_hz
-                            frame_index = 1 + round(rel_seconds * self.config.camera.fps)
+                            frame_index_from_t0 = 1 + round(rel_seconds * float(alignment["effective_fps"]))
+                            video_frame_index_estimated = (
+                                int(alignment["usable_video_frame_start"]) + frame_index_from_t0 - 1
+                            )
 
-                        assert end_sample is not None
+                        assert target_end_sample is not None
                         window_remaining = (
-                            end_sample - detection.sample_number
+                            target_end_sample - detection.sample_number
                         ) / self.config.daq.sample_rate_hz
-                        if detection.sample_number > end_sample:
-                            frame_index = -1
+                        if detection.sample_number >= target_end_sample:
+                            frame_index_from_t0 = -1
+                            video_frame_index_estimated = -1
 
                         with self._lock:
                             self._status.trigger_count += 1
@@ -316,24 +381,32 @@ class ExperimentCoordinator:
                             "absolute_time": now.isoformat(timespec="milliseconds"),
                             "relative_time_seconds": f"{rel_seconds:.6f}",
                             "sample_number": detection.sample_number,
-                            "frame_index": frame_index,
+                            "frame_index": frame_index_from_t0,
                             "window_remaining": f"{window_remaining:.3f}",
                             "frame_mapping_mode": "estimated_fps",
+                            "sample_offset_from_t0": sample_offset,
+                            "frame_index_from_t0": frame_index_from_t0,
+                            "video_frame_index_estimated": video_frame_index_estimated,
+                            "timebase": "daq_sample_clock",
                         }
                         writer.writerow(row)
                         csv_file.flush()
                         db.execute(
                             """
-                            insert into triggers values (?, ?, ?, ?, ?, ?, ?)
+                            insert into triggers values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 trigger_index,
                                 row["absolute_time"],
                                 rel_seconds,
                                 detection.sample_number,
-                                frame_index,
+                                frame_index_from_t0,
                                 window_remaining,
                                 row["frame_mapping_mode"],
+                                sample_offset,
+                                frame_index_from_t0,
+                                video_frame_index_estimated,
+                                row["timebase"],
                             ),
                         )
                         db.commit()
@@ -341,8 +414,15 @@ class ExperimentCoordinator:
                         self.event_bus.publish("trigger", row)
                         self.event_bus.publish("status", self.status_dict())
 
-                    if end_sample is not None and global_sample > end_sample:
+                    if target_end_sample is not None and global_sample >= target_end_sample:
+                        stop_overshoot_samples = max(0, global_sample - target_end_sample)
+                        if alignment is not None:
+                            alignment["stop_overshoot_samples"] = stop_overshoot_samples
+                            alignment["stop_overshoot_seconds"] = stop_overshoot_samples / self.config.daq.sample_rate_hz
+                            alignment["finished_at_log_time"] = datetime.now().isoformat(timespec="milliseconds")
+                            self._write_alignment(alignment_path, alignment)
                         with self._lock:
+                            self._status.stop_overshoot_samples = stop_overshoot_samples
                             self._set_finished_locked("finished")
                         self.event_bus.publish("status", self.status_dict())
                         return
@@ -366,6 +446,104 @@ class ExperimentCoordinator:
             "points": samples[:: max(1, len(samples) // 80)],
         }
         self.event_bus.publish("waveform", payload)
+
+    def _build_alignment_metadata(
+        self,
+        sync_context: SyncStartContext,
+        t0_sample_number: int,
+        output_dir: Path,
+    ) -> Dict[str, Any]:
+        sample_rate_hz = self.config.daq.sample_rate_hz
+        window_seconds = self.config.window_minutes * 60.0
+        target_window_samples = int(round(window_seconds * sample_rate_hz))
+        target_end_sample = t0_sample_number + target_window_samples
+        effective_fps = float(self.camera.status().fps or self.config.camera.fps)
+        expected_total_frames = int(round(window_seconds * effective_fps))
+        t0_monotonic_ns = sync_context.daq_sample0_monotonic_ns + int(
+            round((t0_sample_number / sample_rate_hz) * 1_000_000_000)
+        )
+        preroll_seconds = (
+            t0_monotonic_ns - sync_context.camera_recording_started_monotonic_ns
+        ) / 1_000_000_000
+        video_t0_frame_estimated = 1 + round(preroll_seconds * effective_fps)
+        usable_video_frame_start = video_t0_frame_estimated
+        usable_video_frame_end = usable_video_frame_start + expected_total_frames - 1
+        uncertainty_seconds = (
+            sync_context.camera_recording_started_monotonic_ns
+            - sync_context.camera_start_call_enter_monotonic_ns
+        ) / 1_000_000_000
+        return {
+            "schema_version": 1,
+            "sync_mode": "preroll_first_trigger_t0",
+            "timebase": "daq_sample_clock",
+            "confidence": "software_estimated_fps; not hardware exposure sync",
+            "output_dir": str(output_dir),
+            "sample_rate_hz": sample_rate_hz,
+            "window_seconds": window_seconds,
+            "target_window_samples": target_window_samples,
+            "target_end_sample": target_end_sample,
+            "effective_fps": effective_fps,
+            "expected_total_frames": expected_total_frames,
+            "camera_recording_started_monotonic_ns": sync_context.camera_recording_started_monotonic_ns,
+            "camera_start_call_enter_monotonic_ns": sync_context.camera_start_call_enter_monotonic_ns,
+            "camera_start_uncertainty_seconds": uncertainty_seconds,
+            "daq_sample0_monotonic_ns": sync_context.daq_sample0_monotonic_ns,
+            "t0_sample_number": t0_sample_number,
+            "t0_monotonic_ns": t0_monotonic_ns,
+            "preroll_seconds": preroll_seconds,
+            "video_t0_frame_estimated": video_t0_frame_estimated,
+            "usable_video_frame_start": usable_video_frame_start,
+            "usable_video_frame_end": usable_video_frame_end,
+            "stop_overshoot_samples": None,
+            "stop_overshoot_seconds": None,
+            "video_validation": {
+                "status": "not_checked",
+                "warning": "Video frame count validation requires an external decoder such as ffprobe.",
+            },
+            "files": {
+                "alignment": "alignment.json",
+                "frame_map": "frame_map.csv",
+                "triggers": "triggers.csv",
+                "trigger_db": "triggers.sqlite3",
+            },
+        }
+
+    @staticmethod
+    def _write_alignment(path: Path, alignment: Dict[str, Any]) -> None:
+        path.write_text(json.dumps(alignment, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @staticmethod
+    def _write_frame_map(
+        path: Path,
+        *,
+        t0_sample_number: int,
+        expected_total_frames: int,
+        usable_video_frame_start: int,
+        effective_fps: float,
+        sample_rate_hz: int,
+    ) -> None:
+        with path.open("w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=[
+                    "relative_frame_index",
+                    "video_frame_index_estimated",
+                    "relative_time_seconds",
+                    "estimated_sample_number",
+                ],
+            )
+            writer.writeheader()
+            for relative_frame_index in range(1, expected_total_frames + 1):
+                relative_time_seconds = (relative_frame_index - 1) / effective_fps
+                writer.writerow(
+                    {
+                        "relative_frame_index": relative_frame_index,
+                        "video_frame_index_estimated": usable_video_frame_start + relative_frame_index - 1,
+                        "relative_time_seconds": f"{relative_time_seconds:.9f}",
+                        "estimated_sample_number": t0_sample_number
+                        + round(relative_time_seconds * sample_rate_hz),
+                    }
+                )
 
     @staticmethod
     def _append_jsonl(path: Path, event: Dict[str, Any]) -> None:

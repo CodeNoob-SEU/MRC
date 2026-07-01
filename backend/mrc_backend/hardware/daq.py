@@ -43,6 +43,7 @@ class DaqStatus:
     sampling: bool = False
     sample_rate_hz: int = 5000
     trigger_channel: int = 0
+    sample0_monotonic_ns: Optional[int] = None
 
 
 @dataclass
@@ -107,6 +108,10 @@ class MockDaq(BaseDaq):
         self._next_trigger_sample = int(config.sample_rate_hz * config.mock_trigger_interval_seconds)
         self._pulse_width_samples = max(3, int(config.sample_rate_hz * 0.005))
 
+    def _reset_samples(self) -> None:
+        self._sample_number = 0
+        self._next_trigger_sample = int(self.config.sample_rate_hz * self.config.mock_trigger_interval_seconds)
+
     def initialize(self) -> DaqStatus:
         self._status.initialized = True
         return self.status()
@@ -114,6 +119,8 @@ class MockDaq(BaseDaq):
     def start_sampling(self) -> DaqStatus:
         if not self._status.initialized:
             self.initialize()
+        self._reset_samples()
+        self._status.sample0_monotonic_ns = time.monotonic_ns()
         self._status.sampling = True
         return self.status()
 
@@ -143,6 +150,7 @@ class MockDaq(BaseDaq):
     def close(self) -> None:
         self._status.sampling = False
         self._status.initialized = False
+        self._status.sample0_monotonic_ns = None
 
     def status(self) -> DaqStatus:
         return replace(self._status)
@@ -230,6 +238,7 @@ class USB3000Daq(BaseDaq):
         dev = self.config.device_index
         self._check(self._dll.SetUSB3ClrAiFifo(dev), "SetUSB3ClrAiFifo")
         self._check(self._dll.SetUSB3AiSoftTrig(dev), "SetUSB3AiSoftTrig")
+        self._status.sample0_monotonic_ns = time.monotonic_ns()
         self._status.sampling = True
         return self.status()
 
@@ -254,6 +263,7 @@ class USB3000Daq(BaseDaq):
             self._dll.USB3CloseDevice(self.config.device_index)
         self._status.initialized = False
         self._status.sampling = False
+        self._status.sample0_monotonic_ns = None
 
     def status(self) -> DaqStatus:
         return replace(self._status)

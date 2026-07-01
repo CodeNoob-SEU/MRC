@@ -31,6 +31,16 @@ type AppStatus = {
   last_error: string | null;
   camera: HardwareStatus | null;
   daq: HardwareStatus | null;
+  sync_timebase: string;
+  t0_locked: boolean;
+  expected_total_frames: number | null;
+  video_t0_frame_estimated: number | null;
+  usable_video_frame_start: number | null;
+  usable_video_frame_end: number | null;
+  preroll_seconds: number | null;
+  stop_overshoot_samples: number | null;
+  alignment_file: string | null;
+  frame_map_file: string | null;
 };
 
 type TriggerRow = {
@@ -41,6 +51,10 @@ type TriggerRow = {
   frame_index: number;
   window_remaining: string;
   frame_mapping_mode: string;
+  sample_offset_from_t0?: number;
+  frame_index_from_t0?: number;
+  video_frame_index_estimated?: number;
+  timebase?: string;
 };
 
 type WaveformPayload = {
@@ -259,6 +273,22 @@ onUnmounted(() => {
         <span>剩余窗口</span>
         <strong>{{ status?.window_remaining_seconds == null ? "-" : status.window_remaining_seconds.toFixed(1) + " s" }}</strong>
       </div>
+      <div class="metric">
+        <span>同步 t0</span>
+        <strong>{{ status?.t0_locked ? "locked" : "waiting" }}</strong>
+      </div>
+      <div class="metric">
+        <span>预计总帧数</span>
+        <strong>{{ status?.expected_total_frames ?? "-" }}</strong>
+      </div>
+      <div class="metric">
+        <span>有效视频帧</span>
+        <strong>{{ status?.usable_video_frame_start == null ? "-" : status.usable_video_frame_start + "-" + status?.usable_video_frame_end }}</strong>
+      </div>
+      <div class="metric">
+        <span>预录时长</span>
+        <strong>{{ status?.preroll_seconds == null ? "-" : status.preroll_seconds.toFixed(3) + " s" }}</strong>
+      </div>
       <div class="metric wide">
         <span>输出目录</span>
         <strong>{{ status?.output_dir ?? "-" }}</strong>
@@ -336,7 +366,8 @@ onUnmounted(() => {
               <th>时间</th>
               <th>rel s</th>
               <th>sample</th>
-              <th>frame</th>
+              <th>t0 frame</th>
+              <th>video frame</th>
             </tr>
           </thead>
           <tbody>
@@ -345,7 +376,8 @@ onUnmounted(() => {
               <td>{{ trigger.absolute_time }}</td>
               <td>{{ trigger.relative_time_seconds }}</td>
               <td>{{ trigger.sample_number }}</td>
-              <td>{{ trigger.frame_index }}</td>
+              <td>{{ trigger.frame_index_from_t0 ?? trigger.frame_index }}</td>
+              <td>{{ trigger.video_frame_index_estimated ?? "-" }}</td>
             </tr>
           </tbody>
         </table>

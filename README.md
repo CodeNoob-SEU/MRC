@@ -288,10 +288,14 @@ Electron starts `backend/.venv` automatically when it exists. Set `MRC_PYTHON` t
 Each experiment creates one timestamped session folder containing:
 
 - `mrc_recording.mp4`
+- `alignment.json`
+- `frame_map.csv`
 - `triggers.csv`
 - `triggers.sqlite3`
 - `events.jsonl`
 - `config_snapshot.json`
+
+`alignment.json` records the DAQ-sample-clock t0, effective FPS, estimated video frame range for the usable imaging window, preroll offset, and stop overshoot. `frame_map.csv` maps each effective frame after the first Trigger to the estimated frame number in the raw video file. `triggers.csv` and `triggers.sqlite3` include both t0-relative frame indexes and estimated raw-video frame indexes.
 
 ## Git Notes
 
