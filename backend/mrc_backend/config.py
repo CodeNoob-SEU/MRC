@@ -50,6 +50,8 @@ class AppConfig:
         config.host = os.getenv("MRC_BACKEND_HOST", config.host)
         config.port = int(os.getenv("MRC_BACKEND_PORT", str(config.port)))
         config.output_root = os.getenv("MRC_OUTPUT_ROOT", config.output_root)
+        config.camera.device_index = int(os.getenv("MRC_CAMERA_DEVICE_INDEX", str(config.camera.device_index)))
+        config.daq.device_index = int(os.getenv("MRC_DAQ_DEVICE_INDEX", str(config.daq.device_index)))
         config.camera.dxmedia_dll = os.getenv("MRC_DXMEDIA_DLL", config.camera.dxmedia_dll)
         config.daq.usb3000_dll = os.getenv("MRC_USB3000_DLL", config.daq.usb3000_dll)
         return config

@@ -5,6 +5,7 @@ This directory is committed so the project can be cloned and tested on another W
 Expected runtime layout:
 
 - `camera/x64/DXMediaCap.dll` and related camera SDK DLLs
+- camera SDK `.ini`, `.config`, and `.lib` files from the x64 demo folder
 - `camera/include/DXMediaCap.h`
 - `camera/include/datastru.h`
 - `daq/x64/USB3000.dll`
@@ -15,4 +16,3 @@ The Python backend defaults to these paths. You can override them with:
 
 - `MRC_DXMEDIA_DLL`
 - `MRC_USB3000_DLL`
-

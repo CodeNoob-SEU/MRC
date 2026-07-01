@@ -74,9 +74,20 @@ class ExperimentCoordinator:
     def diagnostics(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "hardware_mode": self.config.hardware_mode,
-            "camera": {"ok": False, "status": asdict(self.camera.status()), "error": None},
+            "camera": {
+                "ok": False,
+                "status": asdict(self.camera.status()),
+                "devices": [],
+                "error": None,
+            },
             "daq": {"ok": False, "status": asdict(self.daq.status()), "error": None},
         }
+        try:
+            enumerate_devices = getattr(self.camera, "enumerate_devices")
+            result["camera"]["devices"] = enumerate_devices()
+        except Exception as exc:  # noqa: BLE001
+            result["camera"]["devices_error"] = str(exc)
+
         try:
             result["camera"]["status"] = asdict(self.camera.initialize())
             result["camera"]["ok"] = True

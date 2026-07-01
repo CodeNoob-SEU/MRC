@@ -79,6 +79,15 @@ If the camera reports `DXOpenDevice failed with code -3 (unsigned=4294967293, he
 - the app is running with 64-bit Python;
 - `vendor/camera/x64/` contains the SDK DLL dependencies.
 
+If the diagnostics response lists devices but the selected device fails to open, try a different index:
+
+```powershell
+$env:MRC_CAMERA_DEVICE_INDEX="1"
+.\scripts\run_real_windows.ps1
+```
+
+If the old vendor software that works is 32-bit, also test the vendor x64 demo from the original SDK. This app uses 64-bit Python and the x64 SDK DLLs.
+
 ## Backend
 
 Create the local virtual environment and install runtime dependencies:

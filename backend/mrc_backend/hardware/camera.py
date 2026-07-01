@@ -17,6 +17,13 @@ class CameraError(RuntimeError):
     pass
 
 
+class DeviceTag(ctypes.Structure):
+    _fields_ = [
+        ("idx", ctypes.c_uint),
+        ("deviceName", ctypes.c_char * 128),
+    ]
+
+
 def signed_u32(value: int) -> int:
     value = int(value) & 0xFFFFFFFF
     return value - 0x100000000 if value & 0x80000000 else value
@@ -120,6 +127,9 @@ class MockCamera(BaseCamera):
         """
         return "data:image/svg+xml;charset=utf-8," + quote(svg)
 
+    def enumerate_devices(self) -> list[dict[str, object]]:
+        return [{"idx": 0, "device_name": "Mock MRC camera"}]
+
 
 class DXMediaCamera(BaseCamera):
     def __init__(self, config: CameraConfig, repo_root: Path) -> None:
@@ -129,6 +139,7 @@ class DXMediaCamera(BaseCamera):
         self._dll: ctypes.CDLL | None = None
         self._handle: ctypes.c_void_p | None = None
         self._status = CameraStatus(mode="real")
+        self._runtime_dir_added = False
 
     def _load(self) -> ctypes.CDLL:
         if platform.system() != "Windows":
@@ -136,8 +147,10 @@ class DXMediaCamera(BaseCamera):
         if not self.dll_path.exists():
             raise CameraError(f"DXMediaCap.dll not found: {self.dll_path}")
         if self._dll is None:
-            if hasattr(os, "add_dll_directory"):
+            if hasattr(os, "add_dll_directory") and not self._runtime_dir_added:
                 os.add_dll_directory(str(self.dll_path.parent))
+                self._runtime_dir_added = True
+            os.chdir(self.dll_path.parent)
             win_dll = getattr(ctypes, "WinDLL", None)
             if win_dll is None:
                 raise CameraError("ctypes.WinDLL is not available in this Python runtime.")
@@ -150,6 +163,8 @@ class DXMediaCamera(BaseCamera):
         dll.DXInitialize.restype = ctypes.c_uint
         dll.DXUninitialize.restype = None
         dll.DXGetDeviceCount.restype = ctypes.c_uint
+        dll.DXEnumVideoDevices.argtypes = [ctypes.POINTER(DeviceTag), ctypes.POINTER(ctypes.c_uint)]
+        dll.DXEnumVideoDevices.restype = ctypes.c_uint
         dll.DXOpenDevice.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_uint)]
         dll.DXOpenDevice.restype = ctypes.c_void_p
         dll.DXCloseDevice.argtypes = [ctypes.c_void_p]
@@ -183,6 +198,25 @@ class DXMediaCamera(BaseCamera):
         dll.DXSnapToJPGFile.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint, ctypes.c_void_p]
         dll.DXSnapToJPGFile.restype = ctypes.c_uint
 
+    def enumerate_devices(self) -> list[dict[str, object]]:
+        dll = self._load()
+        result = dll.DXInitialize()
+        if result != 0:
+            raise CameraError(f"DXInitialize failed with code {format_sdk_code(result)}")
+        count = int(dll.DXGetDeviceCount())
+        self._status.device_count = count
+        max_devices = max(count, 16)
+        tags = (DeviceTag * max_devices)()
+        num = ctypes.c_uint(max_devices)
+        enum_result = dll.DXEnumVideoDevices(tags, ctypes.byref(num))
+        if enum_result != 0:
+            raise CameraError(f"DXEnumVideoDevices failed with code {format_sdk_code(enum_result)}")
+        devices: list[dict[str, object]] = []
+        for idx in range(int(num.value)):
+            name = bytes(tags[idx].deviceName).split(b"\0", 1)[0].decode("mbcs", errors="replace")
+            devices.append({"idx": int(tags[idx].idx), "device_name": name})
+        return devices
+
     def initialize(self) -> CameraStatus:
         dll = self._load()
         result = dll.DXInitialize()
@@ -195,9 +229,15 @@ class DXMediaCamera(BaseCamera):
         err = ctypes.c_uint(0)
         handle = dll.DXOpenDevice(self.config.device_index, ctypes.byref(err))
         if not handle or err.value != 0:
+            devices = []
+            try:
+                devices = self.enumerate_devices()
+            except Exception:
+                devices = []
             raise CameraError(
                 "DXOpenDevice failed with code "
                 f"{format_sdk_code(err.value)}; device_count={count}; "
+                f"selected_index={self.config.device_index}; devices={devices}; "
                 "check that the camera is connected, the vendor demo can open it, "
                 "and no other program is occupying it."
             )
