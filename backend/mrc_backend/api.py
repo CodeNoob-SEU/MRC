@@ -54,7 +54,8 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
 
     @app.on_event("shutdown")
     async def shutdown() -> None:
-        coordinator.close()
+        timeout_seconds = float(os.getenv("MRC_SHUTDOWN_TIMEOUT_SECONDS", "4"))
+        coordinator.close_with_deadline(timeout_seconds=timeout_seconds)
 
     @app.get("/health")
     def health() -> Dict[str, Any]:

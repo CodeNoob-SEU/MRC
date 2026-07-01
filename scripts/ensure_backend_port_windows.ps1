@@ -21,8 +21,13 @@ for ($attempt = 1; $attempt -le 5; $attempt++) {
     $processName = if ($null -eq $process) { "unknown" } else { $process.ProcessName }
     Write-Host "Port $Port is occupied by PID $processId ($processName); killing process tree... attempt $attempt"
 
-    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
     & taskkill.exe /PID $processId /T /F 2>$null | Out-Host
+    Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+    try {
+      Wait-Process -Id $processId -Timeout 2 -ErrorAction SilentlyContinue
+    } catch {
+      # Continue to port-level verification below.
+    }
   }
 
   for ($wait = 0; $wait -lt 20; $wait++) {

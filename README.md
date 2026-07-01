@@ -267,6 +267,15 @@ $env:MRC_BACKEND_PORT="7877"
 .\scripts\run_real_windows.ps1
 ```
 
+Backend shutdown is deadline-protected because some camera SDK calls can block during preview/capture teardown. By default the backend waits up to 4 seconds for graceful hardware cleanup, then forces the Python process to exit so the port is released:
+
+```powershell
+$env:MRC_SHUTDOWN_TIMEOUT_SECONDS="4"
+.\scripts\run_real_windows_x86.ps1
+```
+
+Electron also runs `taskkill /T /F` for its backend child on quit. If a stale backend is still listening before startup, `scripts\ensure_backend_port_windows.ps1` kills the listener PID before launching a new backend.
+
 ## Backend
 
 Create the local virtual environment and install runtime dependencies:

@@ -74,9 +74,15 @@ function stopBackend(): void {
     return;
   }
   if (process.platform === "win32" && backendProcess.pid) {
-    spawn("taskkill.exe", ["/PID", String(backendProcess.pid), "/T", "/F"], {
-      windowsHide: true
-    });
+    try {
+      execFileSync("taskkill.exe", ["/PID", String(backendProcess.pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore",
+        timeout: 5000
+      });
+    } catch (error) {
+      console.warn(`[backend] taskkill failed: ${String(error)}`);
+    }
   } else {
     backendProcess.kill();
   }
@@ -137,6 +143,20 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  stopBackend();
+});
+
+process.once("SIGINT", () => {
+  stopBackend();
+  app.exit(0);
+});
+
+process.once("SIGTERM", () => {
+  stopBackend();
+  app.exit(0);
+});
+
+process.once("exit", () => {
   stopBackend();
 });
 

@@ -6,6 +6,7 @@ from pathlib import Path
 import csv
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -269,6 +270,31 @@ class ExperimentCoordinator:
             self._preview_worker.join(timeout=2.0)
         self.daq.close()
         self.camera.close()
+
+    def close_with_deadline(self, timeout_seconds: float = 4.0) -> None:
+        done = threading.Event()
+
+        def close_target() -> None:
+            try:
+                self.close()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warning("Coordinator shutdown cleanup failed: %s", exc)
+            finally:
+                done.set()
+
+        cleanup_thread = threading.Thread(
+            target=close_target,
+            name="mrc-shutdown-cleanup",
+            daemon=True,
+        )
+        cleanup_thread.start()
+        cleanup_thread.join(timeout=max(0.5, timeout_seconds))
+        if not done.is_set():
+            self._logger.error(
+                "Coordinator shutdown exceeded %.1fs; forcing Python process exit to release backend port.",
+                timeout_seconds,
+            )
+            os._exit(0)
 
     def _ensure_preview_worker_locked(self) -> None:
         if self._preview_worker is not None and self._preview_worker.is_alive():
