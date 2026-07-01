@@ -27,6 +27,15 @@ class DeviceTag(ctypes.Structure):
     ]
 
 
+class Rect(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
 class VidCodecPara(ctypes.Structure):
     _fields_ = [
         ("fps", ctypes.c_int),
@@ -83,6 +92,8 @@ class CameraStatus:
     video_source_status: str = ""
     hd_device: Optional[bool] = None
     capture_status: str = ""
+    preview_status: str = ""
+    preview_started: bool = False
 
 
 class BaseCamera:
@@ -183,6 +194,8 @@ class DXMediaCamera(BaseCamera):
         self._sdk_lock = threading.Lock()
         self._sdk_thread: Optional[threading.Thread] = None
         self._sdk_thread_id: Optional[int] = None
+        self._preview_hwnd: Optional[int] = None
+        self._preview_started = False
 
     def _load(self) -> ctypes.CDLL:
         if platform.system() != "Windows":
@@ -309,6 +322,18 @@ class DXMediaCamera(BaseCamera):
         dll.DXGetSignalPresent.restype = ctypes.c_uint
         dll.DXSetParentWnd.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         dll.DXSetParentWnd.restype = ctypes.c_uint
+        dll.DXStartPreviewEx.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(Rect),
+            ctypes.POINTER(Rect),
+            ctypes.c_uint,
+            ctypes.c_bool,
+            ctypes.c_bool,
+        ]
+        dll.DXStartPreviewEx.restype = ctypes.c_uint
+        dll.DXStopPreview.argtypes = [ctypes.c_void_p]
+        dll.DXStopPreview.restype = ctypes.c_uint
         dll.DXSetVideoCodec.argtypes = [ctypes.c_void_p, ctypes.POINTER(DeviceTag)]
         dll.DXSetVideoCodec.restype = ctypes.c_uint
         dll.DXSetVideoCodecPara.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(VidCodecPara)]
@@ -406,6 +431,7 @@ class DXMediaCamera(BaseCamera):
         self._ensure_com_initialized()
         if self._handle is not None and self._status.initialized:
             self._sync_video_status_on_sdk(dll)
+            self._start_hidden_preview_on_sdk(dll)
             return self.status()
         result = dll.DXInitialize()
         if result != 0:
@@ -460,9 +486,82 @@ class DXMediaCamera(BaseCamera):
         if run_result != 0:
             raise CameraError(f"DXDeviceRunEx failed with code {format_sdk_code(run_result)}")
         self._sync_video_status_on_sdk(dll)
+        self._start_hidden_preview_on_sdk(dll)
         self._scan_video_sources_on_sdk(dll)
         self._sync_video_status_on_sdk(dll)
         return self.status()
+
+    def _start_hidden_preview_on_sdk(self, dll: ctypes.CDLL) -> None:
+        if self._handle is None or self._preview_started:
+            return
+        width = int(self._status.width or self.config.width)
+        height = int(self._status.height or self.config.height)
+        hwnd = self._create_hidden_preview_window(width, height)
+        if hwnd is None:
+            self._status.preview_status = "hidden preview window creation failed"
+            self._status.preview_started = False
+            return
+        rect = Rect(0, 0, width, height)
+        result = dll.DXStartPreviewEx(
+            self._handle,
+            ctypes.c_void_p(hwnd),
+            ctypes.byref(rect),
+            None,
+            self.config.preview_mode,
+            False,
+            False,
+        )
+        self._status.preview_status = f"DXStartPreviewEx(hidden hwnd, mode={self.config.preview_mode}) -> {format_sdk_code(result)}"
+        if result != 0:
+            self._destroy_hidden_preview_window(hwnd)
+            self._status.preview_started = False
+            return
+        self._preview_hwnd = hwnd
+        self._preview_started = True
+        self._status.preview_started = True
+        parent_result = dll.DXSetParentWnd(self._handle, ctypes.c_void_p(hwnd))
+        self._status.preview_status += f"; DXSetParentWnd -> {format_sdk_code(parent_result)}"
+
+    @staticmethod
+    def _create_hidden_preview_window(width: int, height: int) -> Optional[int]:
+        if platform.system() != "Windows":
+            return None
+        user32 = ctypes.windll.user32
+        user32.CreateWindowExW.argtypes = [
+            ctypes.c_ulong,
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_ulong,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        user32.CreateWindowExW.restype = ctypes.c_void_p
+        hwnd = user32.CreateWindowExW(
+            0,
+            "STATIC",
+            "MRC hidden camera preview",
+            0,
+            0,
+            0,
+            int(width),
+            int(height),
+            None,
+            None,
+            None,
+            None,
+        )
+        return int(hwnd) if hwnd else None
+
+    @staticmethod
+    def _destroy_hidden_preview_window(hwnd: Optional[int]) -> None:
+        if hwnd and platform.system() == "Windows":
+            ctypes.windll.user32.DestroyWindow(ctypes.c_void_p(hwnd))
 
     def _try_set_video_source_on_sdk(self, dll: ctypes.CDLL, phase: str) -> None:
         if self._handle is None:
@@ -729,6 +828,15 @@ class DXMediaCamera(BaseCamera):
         if self._dll is not None and self._handle is not None:
             if self._status.recording:
                 self._stop_recording_on_sdk()
+            if self._preview_started:
+                try:
+                    self._dll.DXStopPreview(self._handle)
+                except Exception:
+                    pass
+                self._preview_started = False
+                self._status.preview_started = False
+            self._destroy_hidden_preview_window(self._preview_hwnd)
+            self._preview_hwnd = None
             self._dll.DXDeviceStop(self._handle)
             self._dll.DXCloseDevice(self._handle)
             self._handle = None
