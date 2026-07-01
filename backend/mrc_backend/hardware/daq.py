@@ -35,7 +35,7 @@ USB3000_ERROR_CODES = {
 }
 
 
-@dataclass(slots=True)
+@dataclass
 class DaqStatus:
     mode: str
     initialized: bool = False
@@ -44,7 +44,7 @@ class DaqStatus:
     trigger_channel: int = 0
 
 
-@dataclass(slots=True)
+@dataclass
 class TriggerDetection:
     sample_number: int
     value: float

@@ -18,7 +18,7 @@ from .hardware.camera import BaseCamera, CameraStatus, build_camera
 from .hardware.daq import BaseDaq, DaqStatus, TriggerDetector, build_daq
 
 
-@dataclass(slots=True)
+@dataclass
 class ExperimentStatus:
     state: str = "idle"
     session_id: str | None = None

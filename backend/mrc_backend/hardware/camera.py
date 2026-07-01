@@ -37,7 +37,7 @@ def format_sdk_code(value: int) -> str:
     return f"{signed} (unsigned={unsigned}, hex=0x{unsigned:08X})"
 
 
-@dataclass(slots=True)
+@dataclass
 class CameraStatus:
     mode: str
     initialized: bool = False

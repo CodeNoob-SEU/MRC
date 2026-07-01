@@ -6,7 +6,7 @@ import json
 import os
 
 
-@dataclass(slots=True)
+@dataclass
 class CameraConfig:
     device_index: int = 0
     fps: float = 40.0
@@ -18,7 +18,7 @@ class CameraConfig:
     dxmedia_dll: str = "vendor/camera/x64/DXMediaCap.dll"
 
 
-@dataclass(slots=True)
+@dataclass
 class DaqConfig:
     device_index: int = 0
     trigger_channel: int = 0
@@ -33,7 +33,7 @@ class DaqConfig:
     mock_trigger_interval_seconds: float = 2.0
 
 
-@dataclass(slots=True)
+@dataclass
 class AppConfig:
     hardware_mode: str = "mock"
     host: str = "127.0.0.1"

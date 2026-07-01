@@ -104,6 +104,7 @@ To run the backend with 32-bit Python and the win32/x86 SDK DLLs:
 ```
 
 This keeps Electron/Vue unchanged but starts the Python backend from `backend\.venv32`.
+The 32-bit backend supports Python 3.9 or newer.
 
 To test the committed win32 vendor demo directly:
 
