@@ -9,15 +9,15 @@ const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 let mainWindow: BrowserWindow | null = null;
 let backendProcess: ChildProcessWithoutNullStreams | null = null;
 
-function clearBackendPort(): void {
+function clearBackendPort(): boolean {
   if (process.env.MRC_SKIP_PORT_CLEANUP === "1" || process.platform !== "win32") {
-    return;
+    return true;
   }
   const repoRoot = path.resolve(__dirname, "..", "..");
   const scriptPath = path.join(repoRoot, "scripts", "ensure_backend_port_windows.ps1");
   if (!fs.existsSync(scriptPath)) {
     console.warn(`[backend] port cleanup script not found: ${scriptPath}`);
-    return;
+    return true;
   }
   try {
     execFileSync(
@@ -25,8 +25,10 @@ function clearBackendPort(): void {
       ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-Port", BACKEND_PORT],
       { cwd: repoRoot, stdio: "inherit" }
     );
+    return true;
   } catch (error) {
     console.warn(`[backend] port cleanup failed: ${String(error)}`);
+    return false;
   }
 }
 
@@ -34,7 +36,9 @@ function startBackend(): void {
   if (backendProcess) {
     return;
   }
-  clearBackendPort();
+  if (!clearBackendPort()) {
+    return;
+  }
   const backendDir = path.resolve(__dirname, "..", "..", "backend");
   const venvPython =
     process.platform === "win32"
