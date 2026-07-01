@@ -129,7 +129,8 @@ class ExperimentCoordinator:
             output_dir.mkdir(parents=True, exist_ok=True)
             self.config.write_snapshot(output_dir / "config_snapshot.json")
             (output_dir / "events.jsonl").write_text("", encoding="utf-8")
-            video_file = output_dir / "mrc_recording.mp4"
+            video_suffix = ".avi" if self.config.camera.capture_format == 1 else ".mp4"
+            video_file = output_dir / f"mrc_recording{video_suffix}"
 
             self.camera.start_recording(video_file)
             self.daq.start_sampling()

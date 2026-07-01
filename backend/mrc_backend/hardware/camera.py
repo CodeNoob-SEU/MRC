@@ -6,10 +6,11 @@ import base64
 import ctypes
 import os
 import platform
+import queue
 import tempfile
 import threading
 import time
-from typing import Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
 
 from ..config import CameraConfig, resolve_path
@@ -28,6 +29,8 @@ class DeviceTag(ctypes.Structure):
 
 COINIT_APARTMENTTHREADED = 0x2
 RPC_E_CHANGED_MODE = -2147417850
+FILE_AVI = 1
+FILE_MP4 = 2
 
 
 def signed_u32(value: int) -> int:
@@ -53,6 +56,12 @@ class CameraStatus:
     frame_mapping_mode: str = "estimated_fps"
     active_file: Optional[str] = None
     com_status: str = ""
+    width: int = 0
+    height: int = 0
+    fps: float = 0.0
+    video_codec: str = ""
+    capture_format: int = FILE_MP4
+    last_preview_error: str = ""
 
 
 class BaseCamera:
@@ -149,6 +158,10 @@ class DXMediaCamera(BaseCamera):
         self._runtime_dir_added = False
         self._com_initialized_threads: Set[int] = set()
         self._com_lock = threading.Lock()
+        self._sdk_queue: "queue.Queue[Tuple[Optional[Callable[[], Any]], queue.Queue[Tuple[bool, Any]]]]" = queue.Queue()
+        self._sdk_lock = threading.Lock()
+        self._sdk_thread: Optional[threading.Thread] = None
+        self._sdk_thread_id: Optional[int] = None
 
     def _load(self) -> ctypes.CDLL:
         if platform.system() != "Windows":
@@ -167,6 +180,41 @@ class DXMediaCamera(BaseCamera):
             self._dll = win_dll(str(self.dll_path))
             self._configure_signatures(self._dll)
         return self._dll
+
+    def _ensure_sdk_thread(self) -> None:
+        with self._sdk_lock:
+            if self._sdk_thread is not None and self._sdk_thread.is_alive():
+                return
+            self._sdk_thread = threading.Thread(
+                target=self._sdk_loop,
+                name="mrc-camera-sdk",
+                daemon=True,
+            )
+            self._sdk_thread.start()
+
+    def _sdk_loop(self) -> None:
+        self._sdk_thread_id = threading.get_ident()
+        while True:
+            func, result_queue = self._sdk_queue.get()
+            if func is None:
+                result_queue.put((True, None))
+                break
+            try:
+                result_queue.put((True, func()))
+            except Exception as exc:  # noqa: BLE001
+                result_queue.put((False, exc))
+        self._sdk_thread_id = None
+
+    def _call_sdk(self, func: Callable[[], Any]) -> Any:
+        if threading.get_ident() == self._sdk_thread_id:
+            return func()
+        self._ensure_sdk_thread()
+        result_queue: "queue.Queue[Tuple[bool, Any]]" = queue.Queue(maxsize=1)
+        self._sdk_queue.put((func, result_queue))
+        ok, payload = result_queue.get()
+        if ok:
+            return payload
+        raise payload
 
     def _ensure_com_initialized(self) -> None:
         if platform.system() != "Windows":
@@ -199,6 +247,8 @@ class DXMediaCamera(BaseCamera):
         dll.DXInitialize.restype = ctypes.c_uint
         dll.DXUninitialize.restype = None
         dll.DXGetDeviceCount.restype = ctypes.c_uint
+        dll.DXEnumVideoCodecs.argtypes = [ctypes.POINTER(DeviceTag), ctypes.POINTER(ctypes.c_uint)]
+        dll.DXEnumVideoCodecs.restype = ctypes.c_uint
         dll.DXEnumVideoDevices.argtypes = [ctypes.POINTER(DeviceTag), ctypes.POINTER(ctypes.c_uint)]
         dll.DXEnumVideoDevices.restype = ctypes.c_uint
         dll.DXOpenDevice.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_uint)]
@@ -216,6 +266,8 @@ class DXMediaCamera(BaseCamera):
             ctypes.c_float,
         ]
         dll.DXSetVideoPara.restype = ctypes.c_uint
+        dll.DXSetVideoCodec.argtypes = [ctypes.c_void_p, ctypes.POINTER(DeviceTag)]
+        dll.DXSetVideoCodec.restype = ctypes.c_uint
         dll.DXDeviceRunEx.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool]
         dll.DXDeviceRunEx.restype = ctypes.c_uint
         dll.DXStartCapture.argtypes = [
@@ -227,6 +279,17 @@ class DXMediaCamera(BaseCamera):
             ctypes.c_uint,
         ]
         dll.DXStartCapture.restype = ctypes.c_uint
+        dll.DXStartCaptureEx.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_uint,
+        ]
+        dll.DXStartCaptureEx.restype = ctypes.c_uint
         dll.DXStopCapture.argtypes = [ctypes.c_void_p]
         dll.DXStopCapture.restype = ctypes.c_uint
         dll.DXDeviceStop.argtypes = [ctypes.c_void_p]
@@ -235,6 +298,9 @@ class DXMediaCamera(BaseCamera):
         dll.DXSnapToJPGFile.restype = ctypes.c_uint
 
     def enumerate_devices(self) -> List[Dict[str, object]]:
+        return self._call_sdk(self._enumerate_devices_on_sdk)
+
+    def _enumerate_devices_on_sdk(self) -> List[Dict[str, object]]:
         dll = self._load()
         self._ensure_com_initialized()
         result = dll.DXInitialize()
@@ -255,6 +321,9 @@ class DXMediaCamera(BaseCamera):
         return devices
 
     def initialize(self) -> CameraStatus:
+        return self._call_sdk(self._initialize_on_sdk)
+
+    def _initialize_on_sdk(self) -> CameraStatus:
         dll = self._load()
         self._ensure_com_initialized()
         result = dll.DXInitialize()
@@ -269,7 +338,7 @@ class DXMediaCamera(BaseCamera):
         if not handle or err.value != 0:
             devices = []
             try:
-                devices = self.enumerate_devices()
+                devices = self._enumerate_devices_on_sdk()
             except Exception:
                 devices = []
             raise CameraError(
@@ -284,6 +353,10 @@ class DXMediaCamera(BaseCamera):
         self._status.initialized = True
         self._status.device_count = count
         self._status.device_name = name.decode("mbcs", errors="replace") if name else ""
+        self._status.width = self.config.width
+        self._status.height = self.config.height
+        self._status.fps = self.config.fps
+        self._status.capture_format = self.config.capture_format
 
         set_result = dll.DXSetVideoPara(
             self._handle,
@@ -295,25 +368,99 @@ class DXMediaCamera(BaseCamera):
         )
         if set_result != 0:
             raise CameraError(f"DXSetVideoPara failed with code {format_sdk_code(set_result)}")
+        self._set_video_codec_on_sdk(dll)
         run_result = dll.DXDeviceRunEx(self._handle, False, False)
         if run_result != 0:
             raise CameraError(f"DXDeviceRunEx failed with code {format_sdk_code(run_result)}")
         return self.status()
 
+    def _set_video_codec_on_sdk(self, dll: ctypes.CDLL) -> None:
+        codec_name = self.config.video_codec.strip()
+        if not codec_name:
+            self._status.video_codec = "raw"
+            return
+        codecs = self._enumerate_video_codecs_on_sdk(dll)
+        chosen: Optional[DeviceTag] = None
+        for codec in codecs:
+            if codec["name"].lower() == codec_name.lower():
+                chosen = self._make_device_tag(int(codec["idx"]), str(codec["name"]))
+                break
+        if chosen is None:
+            for codec in codecs:
+                if codec_name.lower() in str(codec["name"]).lower():
+                    chosen = self._make_device_tag(int(codec["idx"]), str(codec["name"]))
+                    break
+        if chosen is None:
+            known_codec_ids = {
+                "sys Codec": 0,
+                "intelH264 Codec": 1,
+                "x264 Codec": 2,
+                "xvid Codec": 3,
+                "nvidia Codec": 4,
+                "intel HEVC Codec": 5,
+                "nvidia HEVC Codec": 6,
+            }
+            chosen = self._make_device_tag(known_codec_ids.get(codec_name, 2), codec_name)
+        result = dll.DXSetVideoCodec(self._handle, ctypes.byref(chosen))
+        if result != 0:
+            names = [codec["name"] for codec in codecs]
+            raise CameraError(
+                f"DXSetVideoCodec({codec_name}) failed with code {format_sdk_code(result)}; "
+                f"available_codecs={names}"
+            )
+        self._status.video_codec = self._device_tag_name(chosen)
+
+    def _enumerate_video_codecs_on_sdk(self, dll: ctypes.CDLL) -> List[Dict[str, object]]:
+        tags = (DeviceTag * 32)()
+        num = ctypes.c_uint(32)
+        enum_result = dll.DXEnumVideoCodecs(tags, ctypes.byref(num))
+        if enum_result != 0:
+            return []
+        codecs: List[Dict[str, object]] = []
+        for idx in range(int(num.value)):
+            codecs.append({"idx": int(tags[idx].idx), "name": self._device_tag_name(tags[idx])})
+        return codecs
+
+    @staticmethod
+    def _make_device_tag(idx: int, name: str) -> DeviceTag:
+        tag = DeviceTag()
+        tag.idx = idx
+        tag.deviceName = name.encode("mbcs", errors="replace")[:127]
+        return tag
+
+    @staticmethod
+    def _device_tag_name(tag: DeviceTag) -> str:
+        return bytes(tag.deviceName).split(b"\0", 1)[0].decode("mbcs", errors="replace")
+
     def start_recording(self, output_file: Path) -> CameraStatus:
+        return self._call_sdk(lambda: self._start_recording_on_sdk(output_file))
+
+    def _start_recording_on_sdk(self, output_file: Path) -> CameraStatus:
         if self._handle is None:
-            self.initialize()
+            self._initialize_on_sdk()
         self._ensure_com_initialized()
         assert self._dll is not None
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        result = self._dll.DXStartCapture(
-            self._handle,
-            str(output_file).encode("mbcs", errors="replace"),
-            int(self.config.save_audio),
-            None,
-            None,
-            1,
-        )
+        if self.config.capture_format in {FILE_AVI, FILE_MP4}:
+            result = self._dll.DXStartCaptureEx(
+                self._handle,
+                str(output_file).encode("mbcs", errors="replace"),
+                int(self.config.save_audio),
+                int(self.config.capture_format),
+                None,
+                None,
+                None,
+                1,
+            )
+        else:
+            result = self._dll.DXStartCapture(
+                self._handle,
+                str(output_file).encode("mbcs", errors="replace"),
+                int(self.config.save_audio),
+                None,
+                None,
+                1,
+            )
         if result != 0:
             raise CameraError(f"DXStartCapture failed with code {format_sdk_code(result)}")
         self._status.recording = True
@@ -321,6 +468,9 @@ class DXMediaCamera(BaseCamera):
         return self.status()
 
     def stop_recording(self) -> CameraStatus:
+        return self._call_sdk(self._stop_recording_on_sdk)
+
+    def _stop_recording_on_sdk(self) -> CameraStatus:
         self._ensure_com_initialized()
         if self._dll is not None and self._handle is not None and self._status.recording:
             result = self._dll.DXStopCapture(self._handle)
@@ -330,10 +480,26 @@ class DXMediaCamera(BaseCamera):
         return self.status()
 
     def close(self) -> None:
+        if threading.get_ident() == self._sdk_thread_id:
+            self._close_on_sdk()
+            return
+        if self._sdk_thread is None:
+            return
+        try:
+            self._call_sdk(self._close_on_sdk)
+        finally:
+            result_queue: "queue.Queue[Tuple[bool, Any]]" = queue.Queue(maxsize=1)
+            self._sdk_queue.put((None, result_queue))
+            result_queue.get()
+            if self._sdk_thread is not None:
+                self._sdk_thread.join(timeout=2.0)
+            self._sdk_thread = None
+
+    def _close_on_sdk(self) -> None:
         self._ensure_com_initialized()
         if self._dll is not None and self._handle is not None:
             if self._status.recording:
-                self.stop_recording()
+                self._stop_recording_on_sdk()
             self._dll.DXDeviceStop(self._handle)
             self._dll.DXCloseDevice(self._handle)
             self._handle = None
@@ -345,6 +511,9 @@ class DXMediaCamera(BaseCamera):
         return replace(self._status)
 
     def preview_frame_data_url(self) -> Optional[str]:
+        return self._call_sdk(self._preview_frame_data_url_on_sdk)
+
+    def _preview_frame_data_url_on_sdk(self) -> Optional[str]:
         if self._dll is None or self._handle is None or not self._status.initialized:
             return None
         self._ensure_com_initialized()
@@ -357,9 +526,14 @@ class DXMediaCamera(BaseCamera):
                 70,
                 None,
             )
-            if result != 0 or not temp_path.exists():
-                return None
+            if result != 0:
+                self._status.last_preview_error = f"DXSnapToJPGFile failed with code {format_sdk_code(result)}"
+                raise CameraError(self._status.last_preview_error)
+            if not temp_path.exists() or temp_path.stat().st_size == 0:
+                self._status.last_preview_error = "DXSnapToJPGFile did not create a non-empty JPG"
+                raise CameraError(self._status.last_preview_error)
             encoded = base64.b64encode(temp_path.read_bytes()).decode("ascii")
+            self._status.last_preview_error = ""
             return f"data:image/jpeg;base64,{encoded}"
         finally:
             try:

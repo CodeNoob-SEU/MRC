@@ -9,12 +9,14 @@ import os
 @dataclass
 class CameraConfig:
     device_index: int = 0
-    fps: float = 40.0
+    fps: float = 25.0
     width: int = 720
     height: int = 576
     video_standard: int = 32
     colorspace: int = 2
     save_audio: bool = False
+    capture_format: int = 2
+    video_codec: str = "x264 Codec"
     dxmedia_dll: str = "vendor/camera/x64/DXMediaCap.dll"
 
 
@@ -58,6 +60,13 @@ class AppConfig:
             config.camera.dxmedia_dll = "vendor/camera/x64/DXMediaCap.dll"
             config.daq.usb3000_dll = "vendor/daq/x64/USB3000.dll"
         config.camera.device_index = int(os.getenv("MRC_CAMERA_DEVICE_INDEX", str(config.camera.device_index)))
+        config.camera.width = int(os.getenv("MRC_CAMERA_WIDTH", str(config.camera.width)))
+        config.camera.height = int(os.getenv("MRC_CAMERA_HEIGHT", str(config.camera.height)))
+        config.camera.fps = float(os.getenv("MRC_CAMERA_FPS", str(config.camera.fps)))
+        config.camera.video_standard = int(os.getenv("MRC_CAMERA_VIDEO_STANDARD", str(config.camera.video_standard)))
+        config.camera.colorspace = int(os.getenv("MRC_CAMERA_COLORSPACE", str(config.camera.colorspace)))
+        config.camera.capture_format = int(os.getenv("MRC_CAMERA_CAPTURE_FORMAT", str(config.camera.capture_format)))
+        config.camera.video_codec = os.getenv("MRC_CAMERA_VIDEO_CODEC", config.camera.video_codec)
         config.daq.device_index = int(os.getenv("MRC_DAQ_DEVICE_INDEX", str(config.daq.device_index)))
         config.camera.dxmedia_dll = os.getenv("MRC_DXMEDIA_DLL", config.camera.dxmedia_dll)
         config.daq.usb3000_dll = os.getenv("MRC_USB3000_DLL", config.daq.usb3000_dll)

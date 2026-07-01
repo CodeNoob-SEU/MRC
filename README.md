@@ -134,6 +134,23 @@ Runtime details can be checked with:
 curl http://127.0.0.1:7876/diagnostics/runtime
 ```
 
+Real camera calls are serialized through one dedicated SDK thread because `DXMediaCap.dll` uses DirectShow/COM objects that are sensitive to thread apartment ownership. The default capture settings are aligned with the vendor demos:
+
+- `MRC_CAMERA_WIDTH=720`
+- `MRC_CAMERA_HEIGHT=576`
+- `MRC_CAMERA_FPS=25`
+- `MRC_CAMERA_VIDEO_STANDARD=32`
+- `MRC_CAMERA_COLORSPACE=2`
+- `MRC_CAMERA_CAPTURE_FORMAT=2` for MP4, `1` for AVI
+- `MRC_CAMERA_VIDEO_CODEC="x264 Codec"`
+
+If MP4 recording still fails on a specific machine, test AVI without changing code:
+
+```powershell
+$env:MRC_CAMERA_CAPTURE_FORMAT="1"
+.\scripts\run_real_windows_x86.ps1
+```
+
 The Windows run scripts use backend port `7876` by default. Before startup, they automatically kill any existing process listening on that port. To override the port:
 
 ```powershell
