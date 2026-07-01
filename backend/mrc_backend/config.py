@@ -9,10 +9,10 @@ import os
 @dataclass
 class CameraConfig:
     device_index: int = 0
-    fps: float = 25.0
-    width: int = 768
-    height: int = 576
-    video_standard: int = 32
+    fps: float = 30.0
+    width: int = 720
+    height: int = 480
+    video_standard: int = 1
     colorspace: int = 2
     save_audio: bool = True
     capture_format: int = 2

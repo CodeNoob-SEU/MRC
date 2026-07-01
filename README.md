@@ -62,7 +62,7 @@ The probe uses `backend\.venv32` and the committed win32 `DXMediaCap.dll` by def
 - hidden-window `DXStartPreview` modes followed by snapshot
 - short MP4 and AVI capture
 
-It also tries common PAL profiles, including the vendor demo's `768x576 @ 25 fps` setting. Results are written to:
+It tries NTSC profiles first (`720x480 @ 30 fps`, `standard=1`) and keeps PAL profiles as fallbacks. Results are written to:
 
 ```text
 camera_probe_output\
@@ -73,21 +73,21 @@ Open the generated JPG files and find the first one that shows a correct camera 
 To test only one profile:
 
 ```powershell
-.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 768 --height 576 --fps 25 --colorspace 2
+.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 480 --fps 30 --standard 1 --colorspace 2
 ```
 
 For AV1/AV2 input testing, start with the VC demo's source-index API:
 
 ```powershell
-.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 768 --height 576 --fps 25 --colorspace 2 --sources 0,1 --source-methods ex
-.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 576 --fps 25 --colorspace 2 --sources 0,1 --source-methods ex
+.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 480 --fps 30 --standard 1 --colorspace 2 --sources 0,1 --source-methods ex
+.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 640 --height 480 --fps 30 --standard 1 --colorspace 2 --sources 0,1 --source-methods ex
 ```
 
 If both are still green, test the older legacy source API:
 
 ```powershell
-.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 576 --fps 25 --colorspace 2 --sources 1,2 --source-methods legacy
-.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 576 --fps 30 --colorspace 2 --sources 1,2 --source-methods legacy
+.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 480 --fps 30 --standard 1 --colorspace 2 --sources 1,2 --source-methods legacy
+.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 640 --height 480 --fps 30 --standard 1 --colorspace 2 --sources 1,2 --source-methods legacy
 ```
 
 In the report, check `signal_after_run.signal`: `1` means that source has a video signal, `0` means signal loss.
@@ -190,10 +190,10 @@ curl http://127.0.0.1:7876/diagnostics/runtime
 
 Real camera calls are serialized through one dedicated SDK thread because `DXMediaCap.dll` uses DirectShow/COM objects that are sensitive to thread apartment ownership. The default capture settings are aligned with the vendor demos:
 
-- `MRC_CAMERA_WIDTH=768`
-- `MRC_CAMERA_HEIGHT=576`
-- `MRC_CAMERA_FPS=25`
-- `MRC_CAMERA_VIDEO_STANDARD=32`
+- `MRC_CAMERA_WIDTH=720`
+- `MRC_CAMERA_HEIGHT=480`
+- `MRC_CAMERA_FPS=30`
+- `MRC_CAMERA_VIDEO_STANDARD=1` for NTSC. PAL is `32`.
 - `MRC_CAMERA_COLORSPACE=2`
 - `MRC_CAMERA_CAPTURE_FORMAT=2` for MP4, `1` for AVI
 - `MRC_CAMERA_VIDEO_CODEC="x264 Codec"`

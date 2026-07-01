@@ -655,11 +655,12 @@ def profiles_from_args(args: argparse.Namespace) -> List[Dict[str, Any]]:
             }
         ]
     common = [
+        ("ntsc_720_yuy2_30", 720, 480, 30.0, 1, CS_YUY2),
+        ("ntsc_640_yuy2_30", 640, 480, 30.0, 1, CS_YUY2),
+        ("ntsc_720_rgb24_30", 720, 480, 30.0, 1, CS_RGB24),
+        ("ntsc_720_rgb32_30", 720, 480, 30.0, 1, CS_RGB32),
         ("pal_720_yuy2_25", 720, 576, 25.0, 32, CS_YUY2),
         ("vendor_win32_768_yuy2_25", 768, 576, 25.0, 32, CS_YUY2),
-        ("pal_720_rgb24_25", 720, 576, 25.0, 32, CS_RGB24),
-        ("pal_720_rgb32_25", 720, 576, 25.0, 32, CS_RGB32),
-        ("pal_720_yuy2_30", 720, 576, 30.0, 32, CS_YUY2),
     ]
     return [
         {"name": name, "width": width, "height": height, "fps": fps, "standard": standard, "colorspace": colorspace}
@@ -759,9 +760,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", default=str(repo_root() / "camera_probe_output"))
     parser.add_argument("--profile", choices=["all", "custom"], default="all")
     parser.add_argument("--width", type=int, default=int(os.getenv("MRC_CAMERA_WIDTH", "720")))
-    parser.add_argument("--height", type=int, default=int(os.getenv("MRC_CAMERA_HEIGHT", "576")))
-    parser.add_argument("--fps", type=float, default=float(os.getenv("MRC_CAMERA_FPS", "25")))
-    parser.add_argument("--standard", type=int, default=int(os.getenv("MRC_CAMERA_VIDEO_STANDARD", "32")))
+    parser.add_argument("--height", type=int, default=int(os.getenv("MRC_CAMERA_HEIGHT", "480")))
+    parser.add_argument("--fps", type=float, default=float(os.getenv("MRC_CAMERA_FPS", "30")))
+    parser.add_argument("--standard", type=int, default=int(os.getenv("MRC_CAMERA_VIDEO_STANDARD", "1")))
     parser.add_argument("--colorspace", type=int, default=int(os.getenv("MRC_CAMERA_COLORSPACE", str(CS_YUY2))))
     parser.add_argument("--codec", default=os.getenv("MRC_CAMERA_VIDEO_CODEC", "x264 Codec"))
     parser.add_argument(
