@@ -294,6 +294,29 @@ class DXMediaCamera(BaseCamera):
         dll.DXStopCapture.restype = ctypes.c_uint
         dll.DXDeviceStop.argtypes = [ctypes.c_void_p]
         dll.DXDeviceStop.restype = ctypes.c_uint
+        dll.DXGetFrameBuffer.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_ubyte),
+            ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.c_void_p,
+        ]
+        dll.DXGetFrameBuffer.restype = ctypes.c_uint
+        dll.DXSaveJPGFile.argtypes = [
+            ctypes.c_char_p,
+            ctypes.POINTER(ctypes.c_ubyte),
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_uint,
+        ]
+        dll.DXSaveJPGFile.restype = ctypes.c_uint
         dll.DXSnapToJPGFile.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint, ctypes.c_void_p]
         dll.DXSnapToJPGFile.restype = ctypes.c_uint
 
@@ -520,18 +543,7 @@ class DXMediaCamera(BaseCamera):
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
             temp_path = Path(temp_file.name)
         try:
-            result = self._dll.DXSnapToJPGFile(
-                self._handle,
-                str(temp_path).encode("mbcs", errors="replace"),
-                70,
-                None,
-            )
-            if result != 0:
-                self._status.last_preview_error = f"DXSnapToJPGFile failed with code {format_sdk_code(result)}"
-                raise CameraError(self._status.last_preview_error)
-            if not temp_path.exists() or temp_path.stat().st_size == 0:
-                self._status.last_preview_error = "DXSnapToJPGFile did not create a non-empty JPG"
-                raise CameraError(self._status.last_preview_error)
+            self._save_frame_buffer_as_jpg_on_sdk(temp_path)
             encoded = base64.b64encode(temp_path.read_bytes()).decode("ascii")
             self._status.last_preview_error = ""
             return f"data:image/jpeg;base64,{encoded}"
@@ -540,6 +552,86 @@ class DXMediaCamera(BaseCamera):
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    def _save_frame_buffer_as_jpg_on_sdk(self, temp_path: Path) -> None:
+        assert self._dll is not None
+        got_len = ctypes.c_uint(0)
+        color_space = ctypes.c_uint(0)
+        width = ctypes.c_uint(0)
+        height = ctypes.c_uint(0)
+        bytes_width = ctypes.c_uint(0)
+
+        result = self._dll.DXGetFrameBuffer(
+            self._handle,
+            None,
+            0,
+            ctypes.byref(got_len),
+            ctypes.byref(color_space),
+            ctypes.byref(width),
+            ctypes.byref(height),
+            ctypes.byref(bytes_width),
+            None,
+        )
+        if result != 0:
+            fallback_len = max(1, int(self.config.width) * int(self.config.height) * 4)
+            got_len = ctypes.c_uint(fallback_len)
+            color_space = ctypes.c_uint(self.config.colorspace)
+            width = ctypes.c_uint(self.config.width)
+            height = ctypes.c_uint(self.config.height)
+            bytes_width = ctypes.c_uint(self.config.width * 4)
+
+        if got_len.value <= 0:
+            message = "DXGetFrameBuffer returned an empty frame"
+            self._status.last_preview_error = message
+            raise CameraError(message)
+
+        frame_buffer = (ctypes.c_ubyte * got_len.value)()
+        result = self._dll.DXGetFrameBuffer(
+            self._handle,
+            frame_buffer,
+            got_len.value,
+            ctypes.byref(got_len),
+            ctypes.byref(color_space),
+            ctypes.byref(width),
+            ctypes.byref(height),
+            ctypes.byref(bytes_width),
+            None,
+        )
+        if result != 0:
+            self._status.last_preview_error = f"DXGetFrameBuffer failed with code {format_sdk_code(result)}"
+            raise CameraError(self._status.last_preview_error)
+
+        result = self._dll.DXSaveJPGFile(
+            str(temp_path).encode("mbcs", errors="replace"),
+            frame_buffer,
+            got_len.value,
+            color_space.value,
+            width.value,
+            height.value,
+            bytes_width.value,
+            70,
+        )
+        if result != 0:
+            self._status.last_preview_error = f"DXSaveJPGFile failed with code {format_sdk_code(result)}"
+            raise CameraError(self._status.last_preview_error)
+        if not temp_path.exists() or temp_path.stat().st_size == 0:
+            self._status.last_preview_error = "DXSaveJPGFile did not create a non-empty JPG"
+            raise CameraError(self._status.last_preview_error)
+
+    def _save_snapshot_as_jpg_on_sdk(self, temp_path: Path) -> None:
+        assert self._dll is not None
+        result = self._dll.DXSnapToJPGFile(
+            self._handle,
+            str(temp_path).encode("mbcs", errors="replace"),
+            70,
+            None,
+        )
+        if result != 0:
+            self._status.last_preview_error = f"DXSnapToJPGFile failed with code {format_sdk_code(result)}"
+            raise CameraError(self._status.last_preview_error)
+        if not temp_path.exists() or temp_path.stat().st_size == 0:
+            self._status.last_preview_error = "DXSnapToJPGFile did not create a non-empty JPG"
+            raise CameraError(self._status.last_preview_error)
 
 
 def build_camera(mode: str, config: CameraConfig, repo_root: Path) -> BaseCamera:
