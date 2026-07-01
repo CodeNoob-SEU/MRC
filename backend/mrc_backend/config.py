@@ -37,7 +37,7 @@ class DaqConfig:
 class AppConfig:
     hardware_mode: str = "mock"
     host: str = "127.0.0.1"
-    port: int = 8765
+    port: int = 7876
     output_root: str = "runs"
     window_minutes: float = 6.0
     camera: CameraConfig = field(default_factory=CameraConfig)

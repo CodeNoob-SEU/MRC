@@ -47,7 +47,7 @@ type WaveformPayload = {
   points: number[];
 };
 
-const backendUrl = window.mrc?.backendUrl ?? "http://127.0.0.1:8765";
+const backendUrl = window.mrc?.backendUrl ?? "http://127.0.0.1:7876";
 const wsUrl = backendUrl.replace("http", "ws") + "/ws";
 
 const status = ref<AppStatus | null>(null);

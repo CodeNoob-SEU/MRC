@@ -3,7 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 
-const BACKEND_PORT = process.env.MRC_BACKEND_PORT ?? "8765";
+const BACKEND_PORT = process.env.MRC_BACKEND_PORT ?? "7876";
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 
 let mainWindow: BrowserWindow | null = null;

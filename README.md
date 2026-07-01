@@ -36,8 +36,8 @@ Real mode expects installed camera and USB3000 drivers and 64-bit Python.
 After starting real mode, use these commands in another PowerShell window:
 
 ```powershell
-curl http://127.0.0.1:8765/status
-curl http://127.0.0.1:8765/diagnostics/hardware
+curl http://127.0.0.1:7876/status
+curl http://127.0.0.1:7876/diagnostics/hardware
 ```
 
 `/diagnostics/hardware` checks the camera and DAQ separately, so one failing device will not hide the other device's status.
@@ -87,6 +87,13 @@ $env:MRC_CAMERA_DEVICE_INDEX="1"
 ```
 
 If the old vendor software that works is 32-bit, also test the vendor x64 demo from the original SDK. This app uses 64-bit Python and the x64 SDK DLLs.
+
+The Windows run scripts use backend port `7876` by default. Before startup, they automatically kill any existing process listening on that port. To override the port:
+
+```powershell
+$env:MRC_BACKEND_PORT="7877"
+.\scripts\run_real_windows.ps1
+```
 
 ## Backend
 
