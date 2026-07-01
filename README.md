@@ -108,6 +108,20 @@ To run the backend with 32-bit Python and the win32/x86 SDK DLLs:
 This keeps Electron/Vue unchanged but starts the Python backend from `backend\.venv32`.
 The setup script prefers Python 3.10 32-bit (`py -3.10-32`) and falls back to any installed 32-bit Python (`py -3-32`). The backend code is compatible with Python 3.9 or newer.
 
+Before setup, verify that the Python launcher can find a 32-bit runtime:
+
+```powershell
+py -0p
+py -3.10-32 --version
+```
+
+If `py -3.10-32` is not available, install the Windows x86 Python installer from python.org. You can also point the setup script at a specific 32-bit Python executable:
+
+```powershell
+$env:MRC_PYTHON32="C:\Users\dell\AppData\Local\Programs\Python\Python310-32\python.exe"
+.\scripts\setup_windows_x86.ps1
+```
+
 To test the committed win32 vendor demo directly:
 
 ```powershell
