@@ -225,13 +225,16 @@ class DXMediaCamera(BaseCamera):
                 result_queue.put((False, exc))
         self._sdk_thread_id = None
 
-    def _call_sdk(self, func: Callable[[], Any]) -> Any:
+    def _call_sdk(self, func: Callable[[], Any], timeout: Optional[float] = None) -> Any:
         if threading.get_ident() == self._sdk_thread_id:
             return func()
         self._ensure_sdk_thread()
         result_queue: "queue.Queue[Tuple[bool, Any]]" = queue.Queue(maxsize=1)
         self._sdk_queue.put((func, result_queue))
-        ok, payload = result_queue.get()
+        try:
+            ok, payload = result_queue.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise CameraError(f"Camera SDK call timed out after {timeout:.1f}s") from exc
         if ok:
             return payload
         raise payload
@@ -642,14 +645,23 @@ class DXMediaCamera(BaseCamera):
             return
         if self._sdk_thread is None:
             return
+        close_completed = False
         try:
-            self._call_sdk(self._close_on_sdk)
-        finally:
+            self._call_sdk(self._close_on_sdk, timeout=1.5)
+            close_completed = True
+        except CameraError as exc:
+            self._status.last_preview_error = f"camera close skipped after timeout: {exc}"
+        if close_completed:
             result_queue: "queue.Queue[Tuple[bool, Any]]" = queue.Queue(maxsize=1)
             self._sdk_queue.put((None, result_queue))
-            result_queue.get()
-            if self._sdk_thread is not None:
-                self._sdk_thread.join(timeout=2.0)
+            try:
+                result_queue.get(timeout=0.5)
+            except queue.Empty:
+                pass
+        if self._sdk_thread is not None:
+            self._sdk_thread.join(timeout=0.5)
+            if self._sdk_thread.is_alive():
+                return
             self._sdk_thread = None
 
     def _close_on_sdk(self) -> None:
@@ -668,7 +680,7 @@ class DXMediaCamera(BaseCamera):
         return replace(self._status)
 
     def preview_frame_data_url(self) -> Optional[str]:
-        return self._call_sdk(self._preview_frame_data_url_on_sdk)
+        return self._call_sdk(self._preview_frame_data_url_on_sdk, timeout=0.8)
 
     def _preview_frame_data_url_on_sdk(self) -> Optional[str]:
         if self._dll is None or self._handle is None or not self._status.initialized:
