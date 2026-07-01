@@ -766,12 +766,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--codec", default=os.getenv("MRC_CAMERA_VIDEO_CODEC", "x264 Codec"))
     parser.add_argument(
         "--sources",
-        default=os.getenv("MRC_CAMERA_SOURCES", "1,2"),
-        help="Comma-separated source values. Legacy DXSetVideoSource uses 1=AV1, 2=AV2, 3=SVIDEO. Use current to skip setting.",
+        default=os.getenv("MRC_CAMERA_SOURCES", "0,1"),
+        help="Comma-separated source values. VC demo uses DXSetVideoSourceEx with 0=AV1, 1=AV2, 2=SVIDEO. Use current to skip setting.",
     )
     parser.add_argument(
         "--source-methods",
-        default=os.getenv("MRC_CAMERA_SOURCE_METHODS", "legacy,ex"),
+        default=os.getenv("MRC_CAMERA_SOURCE_METHODS", "ex"),
         help="Comma-separated source set methods: legacy, ex.",
     )
     parser.add_argument("--settle-seconds", type=float, default=1.0)

@@ -27,10 +27,25 @@ class DeviceTag(ctypes.Structure):
     ]
 
 
+class VidCodecPara(ctypes.Structure):
+    _fields_ = [
+        ("fps", ctypes.c_int),
+        ("keyframeinterval", ctypes.c_int),
+        ("rcMode", ctypes.c_int),
+        ("Quality", ctypes.c_int),
+        ("Bitrate", ctypes.c_int),
+        ("Maxrbps", ctypes.c_int),
+        ("Peekbps", ctypes.c_int),
+    ]
+
+
 COINIT_APARTMENTTHREADED = 0x2
 RPC_E_CHANGED_MODE = -2147417850
 FILE_AVI = 1
 FILE_MP4 = 2
+CS_RGB24 = 0
+CODEC_X264 = 2
+CODEC_CBR = 0
 
 
 def signed_u32(value: int) -> int:
@@ -62,6 +77,9 @@ class CameraStatus:
     video_codec: str = ""
     capture_format: int = FILE_MP4
     last_preview_error: str = ""
+    video_source_index: int = 0
+    signal_present: Optional[int] = None
+    preview_mode: int = 0
 
 
 class BaseCamera:
@@ -266,8 +284,27 @@ class DXMediaCamera(BaseCamera):
             ctypes.c_float,
         ]
         dll.DXSetVideoPara.restype = ctypes.c_uint
+        dll.DXGetVideoPara.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_float),
+        ]
+        dll.DXGetVideoPara.restype = ctypes.c_uint
+        dll.DXSetVideoSourceEx.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        dll.DXSetVideoSourceEx.restype = ctypes.c_uint
+        dll.DXGetSignalPresent.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint)]
+        dll.DXGetSignalPresent.restype = ctypes.c_uint
+        dll.DXSetParentWnd.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        dll.DXSetParentWnd.restype = ctypes.c_uint
         dll.DXSetVideoCodec.argtypes = [ctypes.c_void_p, ctypes.POINTER(DeviceTag)]
         dll.DXSetVideoCodec.restype = ctypes.c_uint
+        dll.DXSetVideoCodecPara.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(VidCodecPara)]
+        dll.DXSetVideoCodecPara.restype = ctypes.c_uint
+        dll.DXSetAudioCodec.argtypes = [ctypes.c_void_p, ctypes.POINTER(DeviceTag)]
+        dll.DXSetAudioCodec.restype = ctypes.c_uint
         dll.DXDeviceRunEx.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool]
         dll.DXDeviceRunEx.restype = ctypes.c_uint
         dll.DXStartCapture.argtypes = [
@@ -317,6 +354,14 @@ class DXMediaCamera(BaseCamera):
             ctypes.c_uint,
         ]
         dll.DXSaveJPGFile.restype = ctypes.c_uint
+        dll.DXGetBuf.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_uint),
+            ctypes.POINTER(ctypes.c_ubyte),
+            ctypes.c_bool,
+        ]
+        dll.DXGetBuf.restype = ctypes.c_uint
         dll.DXSnapToJPGFile.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint, ctypes.c_void_p]
         dll.DXSnapToJPGFile.restype = ctypes.c_uint
 
@@ -380,6 +425,15 @@ class DXMediaCamera(BaseCamera):
         self._status.height = self.config.height
         self._status.fps = self.config.fps
         self._status.capture_format = self.config.capture_format
+        self._status.video_source_index = self.config.video_source_index
+        self._status.preview_mode = self.config.preview_mode
+
+        source_result = dll.DXSetVideoSourceEx(self._handle, self.config.video_source_index)
+        if source_result != 0:
+            raise CameraError(
+                "DXSetVideoSourceEx failed with code "
+                f"{format_sdk_code(source_result)}; source_index={self.config.video_source_index}"
+            )
 
         set_result = dll.DXSetVideoPara(
             self._handle,
@@ -391,11 +445,42 @@ class DXMediaCamera(BaseCamera):
         )
         if set_result != 0:
             raise CameraError(f"DXSetVideoPara failed with code {format_sdk_code(set_result)}")
-        self._set_video_codec_on_sdk(dll)
         run_result = dll.DXDeviceRunEx(self._handle, False, False)
         if run_result != 0:
             raise CameraError(f"DXDeviceRunEx failed with code {format_sdk_code(run_result)}")
+        self._sync_video_status_on_sdk(dll)
+        second_source_result = dll.DXSetVideoSourceEx(self._handle, self.config.video_source_index)
+        if second_source_result != 0:
+            raise CameraError(
+                "DXSetVideoSourceEx after run failed with code "
+                f"{format_sdk_code(second_source_result)}; source_index={self.config.video_source_index}"
+            )
         return self.status()
+
+    def _sync_video_status_on_sdk(self, dll: ctypes.CDLL) -> None:
+        if self._handle is None:
+            return
+        standard = ctypes.c_uint(self.config.video_standard)
+        colorspace = ctypes.c_uint(self.config.colorspace)
+        width = ctypes.c_uint(self.config.width)
+        height = ctypes.c_uint(self.config.height)
+        fps = ctypes.c_float(self.config.fps)
+        result = dll.DXGetVideoPara(
+            self._handle,
+            ctypes.byref(standard),
+            ctypes.byref(colorspace),
+            ctypes.byref(width),
+            ctypes.byref(height),
+            ctypes.byref(fps),
+        )
+        if result == 0:
+            self._status.width = int(width.value)
+            self._status.height = int(height.value)
+            self._status.fps = float(fps.value)
+        signal = ctypes.c_uint(0)
+        signal_result = dll.DXGetSignalPresent(self._handle, ctypes.byref(signal))
+        if signal_result == 0:
+            self._status.signal_present = int(signal.value)
 
     def _set_video_codec_on_sdk(self, dll: ctypes.CDLL) -> None:
         codec_name = self.config.video_codec.strip()
@@ -431,7 +516,27 @@ class DXMediaCamera(BaseCamera):
                 f"DXSetVideoCodec({codec_name}) failed with code {format_sdk_code(result)}; "
                 f"available_codecs={names}"
             )
+        codec_para = self._build_vc_demo_codec_para()
+        para_result = dll.DXSetVideoCodecPara(self._handle, CODEC_X264, ctypes.byref(codec_para))
+        if para_result != 0:
+            raise CameraError(f"DXSetVideoCodecPara failed with code {format_sdk_code(para_result)}")
         self._status.video_codec = self._device_tag_name(chosen)
+
+    def _build_vc_demo_codec_para(self) -> VidCodecPara:
+        fps = max(1, int(round(self._status.fps or self.config.fps)))
+        return VidCodecPara(
+            fps=fps,
+            keyframeinterval=fps,
+            rcMode=CODEC_CBR,
+            Quality=29,
+            Bitrate=1200,
+            Maxrbps=4000,
+            Peekbps=2000,
+        )
+
+    def _set_audio_codec_on_sdk(self, dll: ctypes.CDLL) -> None:
+        audio_tag = self._make_device_tag(0, "aac Codec")
+        dll.DXSetAudioCodec(self._handle, ctypes.byref(audio_tag))
 
     def _enumerate_video_codecs_on_sdk(self, dll: ctypes.CDLL) -> List[Dict[str, object]]:
         tags = (DeviceTag * 32)()
@@ -464,26 +569,17 @@ class DXMediaCamera(BaseCamera):
         self._ensure_com_initialized()
         assert self._dll is not None
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        if self.config.capture_format in {FILE_AVI, FILE_MP4}:
-            result = self._dll.DXStartCaptureEx(
-                self._handle,
-                str(output_file).encode("mbcs", errors="replace"),
-                int(self.config.save_audio),
-                int(self.config.capture_format),
-                None,
-                None,
-                None,
-                1,
-            )
-        else:
-            result = self._dll.DXStartCapture(
-                self._handle,
-                str(output_file).encode("mbcs", errors="replace"),
-                int(self.config.save_audio),
-                None,
-                None,
-                1,
-            )
+        self._sync_video_status_on_sdk(self._dll)
+        self._set_video_codec_on_sdk(self._dll)
+        self._set_audio_codec_on_sdk(self._dll)
+        result = self._dll.DXStartCapture(
+            self._handle,
+            str(output_file).encode("mbcs", errors="replace"),
+            int(self.config.save_audio),
+            None,
+            None,
+            1,
+        )
         if result != 0:
             raise CameraError(f"DXStartCapture failed with code {format_sdk_code(result)}")
         self._status.recording = True
@@ -543,7 +639,7 @@ class DXMediaCamera(BaseCamera):
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
             temp_path = Path(temp_file.name)
         try:
-            self._save_frame_buffer_as_jpg_on_sdk(temp_path)
+            self._save_get_buf_as_jpg_on_sdk(temp_path)
             encoded = base64.b64encode(temp_path.read_bytes()).decode("ascii")
             self._status.last_preview_error = ""
             return f"data:image/jpeg;base64,{encoded}"
@@ -552,6 +648,40 @@ class DXMediaCamera(BaseCamera):
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    def _save_get_buf_as_jpg_on_sdk(self, temp_path: Path) -> None:
+        assert self._dll is not None
+        width = ctypes.c_uint(int(self._status.width or self.config.width))
+        height = ctypes.c_uint(int(self._status.height or self.config.height))
+        buffer_len = max(1, int(width.value) * int(height.value) * 4)
+        frame_buffer = (ctypes.c_ubyte * buffer_len)()
+        result = self._dll.DXGetBuf(
+            self._handle,
+            ctypes.byref(width),
+            ctypes.byref(height),
+            frame_buffer,
+            False,
+        )
+        if result != 0:
+            self._status.last_preview_error = f"DXGetBuf failed with code {format_sdk_code(result)}"
+            raise CameraError(self._status.last_preview_error)
+        save_len = int(width.value) * int(height.value) * 3
+        result = self._dll.DXSaveJPGFile(
+            str(temp_path).encode("mbcs", errors="replace"),
+            frame_buffer,
+            save_len,
+            CS_RGB24,
+            int(width.value),
+            int(height.value),
+            int(width.value) * 3,
+            70,
+        )
+        if result != 0:
+            self._status.last_preview_error = f"DXSaveJPGFile(DXGetBuf) failed with code {format_sdk_code(result)}"
+            raise CameraError(self._status.last_preview_error)
+        if not temp_path.exists() or temp_path.stat().st_size == 0:
+            self._status.last_preview_error = "DXSaveJPGFile(DXGetBuf) did not create a non-empty JPG"
+            raise CameraError(self._status.last_preview_error)
 
     def _save_frame_buffer_as_jpg_on_sdk(self, temp_path: Path) -> None:
         assert self._dll is not None

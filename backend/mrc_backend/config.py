@@ -10,13 +10,15 @@ import os
 class CameraConfig:
     device_index: int = 0
     fps: float = 25.0
-    width: int = 720
+    width: int = 768
     height: int = 576
     video_standard: int = 32
     colorspace: int = 2
-    save_audio: bool = False
+    save_audio: bool = True
     capture_format: int = 2
     video_codec: str = "x264 Codec"
+    video_source_index: int = 0
+    preview_mode: int = 2
     dxmedia_dll: str = "vendor/camera/x64/DXMediaCap.dll"
 
 
@@ -67,6 +69,16 @@ class AppConfig:
         config.camera.colorspace = int(os.getenv("MRC_CAMERA_COLORSPACE", str(config.camera.colorspace)))
         config.camera.capture_format = int(os.getenv("MRC_CAMERA_CAPTURE_FORMAT", str(config.camera.capture_format)))
         config.camera.video_codec = os.getenv("MRC_CAMERA_VIDEO_CODEC", config.camera.video_codec)
+        config.camera.video_source_index = int(
+            os.getenv("MRC_CAMERA_VIDEO_SOURCE_INDEX", str(config.camera.video_source_index))
+        )
+        config.camera.preview_mode = int(os.getenv("MRC_CAMERA_PREVIEW_MODE", str(config.camera.preview_mode)))
+        config.camera.save_audio = os.getenv("MRC_CAMERA_SAVE_AUDIO", str(config.camera.save_audio)).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         config.daq.device_index = int(os.getenv("MRC_DAQ_DEVICE_INDEX", str(config.daq.device_index)))
         config.camera.dxmedia_dll = os.getenv("MRC_DXMEDIA_DLL", config.camera.dxmedia_dll)
         config.daq.usb3000_dll = os.getenv("MRC_USB3000_DLL", config.daq.usb3000_dll)

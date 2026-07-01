@@ -76,17 +76,18 @@ To test only one profile:
 .\scripts\camera_probe_windows_x86.ps1 --profile custom --width 768 --height 576 --fps 25 --colorspace 2
 ```
 
-For AV1/AV2 input testing, start with the two profiles that usually produce a frame buffer:
+For AV1/AV2 input testing, start with the VC demo's source-index API:
+
+```powershell
+.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 768 --height 576 --fps 25 --colorspace 2 --sources 0,1 --source-methods ex
+.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 576 --fps 25 --colorspace 2 --sources 0,1 --source-methods ex
+```
+
+If both are still green, test the older legacy source API:
 
 ```powershell
 .\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 576 --fps 25 --colorspace 2 --sources 1,2 --source-methods legacy
 .\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 576 --fps 30 --colorspace 2 --sources 1,2 --source-methods legacy
-```
-
-If both are still green, test the newer source-index API:
-
-```powershell
-.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 576 --fps 25 --colorspace 2 --sources 0,1,2,3 --source-methods ex
 ```
 
 In the report, check `signal_after_run.signal`: `1` means that source has a video signal, `0` means signal loss.
@@ -189,13 +190,24 @@ curl http://127.0.0.1:7876/diagnostics/runtime
 
 Real camera calls are serialized through one dedicated SDK thread because `DXMediaCap.dll` uses DirectShow/COM objects that are sensitive to thread apartment ownership. The default capture settings are aligned with the vendor demos:
 
-- `MRC_CAMERA_WIDTH=720`
+- `MRC_CAMERA_WIDTH=768`
 - `MRC_CAMERA_HEIGHT=576`
 - `MRC_CAMERA_FPS=25`
 - `MRC_CAMERA_VIDEO_STANDARD=32`
 - `MRC_CAMERA_COLORSPACE=2`
 - `MRC_CAMERA_CAPTURE_FORMAT=2` for MP4, `1` for AVI
 - `MRC_CAMERA_VIDEO_CODEC="x264 Codec"`
+- `MRC_CAMERA_VIDEO_SOURCE_INDEX=0` for AV1, `1` for AV2, matching the VC demo's `DXSetVideoSourceEx`
+- `MRC_CAMERA_PREVIEW_MODE=2` for D3D, matching `VCdemoSeting.ini`
+
+The Python camera adapter follows the working VC demo order: `DXOpenDevice`, `DXSetVideoSourceEx`, `DXSetVideoPara`, `DXDeviceRunEx`, `DXGetVideoPara`, `DXSetVideoSourceEx` again, then preview via `DXGetBuf`. Recording follows `DeviceControl::StartRecord`: `DXSetVideoCodec`, `DXSetVideoCodecPara`, `DXSetAudioCodec`, `DXStartCapture`.
+
+To test AV2 in the main app:
+
+```powershell
+$env:MRC_CAMERA_VIDEO_SOURCE_INDEX="1"
+.\scripts\run_real_windows_x86.ps1
+```
 
 If MP4 recording still fails on a specific machine, test AVI without changing code:
 
