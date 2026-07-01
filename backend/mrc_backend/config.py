@@ -50,6 +50,13 @@ class AppConfig:
         config.host = os.getenv("MRC_BACKEND_HOST", config.host)
         config.port = int(os.getenv("MRC_BACKEND_PORT", str(config.port)))
         config.output_root = os.getenv("MRC_OUTPUT_ROOT", config.output_root)
+        vendor_arch = os.getenv("MRC_VENDOR_ARCH", "").lower()
+        if vendor_arch in {"win32", "x86", "32"}:
+            config.camera.dxmedia_dll = "vendor/camera/win32/DXMediaCap.dll"
+            config.daq.usb3000_dll = "vendor/daq/x86/USB3000.dll"
+        elif vendor_arch in {"x64", "amd64", "64"}:
+            config.camera.dxmedia_dll = "vendor/camera/x64/DXMediaCap.dll"
+            config.daq.usb3000_dll = "vendor/daq/x64/USB3000.dll"
         config.camera.device_index = int(os.getenv("MRC_CAMERA_DEVICE_INDEX", str(config.camera.device_index)))
         config.daq.device_index = int(os.getenv("MRC_DAQ_DEVICE_INDEX", str(config.daq.device_index)))
         config.camera.dxmedia_dll = os.getenv("MRC_DXMEDIA_DLL", config.camera.dxmedia_dll)

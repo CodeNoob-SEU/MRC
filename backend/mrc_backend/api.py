@@ -69,6 +69,8 @@ def create_app(config: AppConfig | None = None, repo_root: Path | None = None) -
 
     @app.get("/diagnostics/runtime")
     def runtime_diagnostics() -> dict[str, Any]:
+        dxmedia_dll = (repo_root / config.camera.dxmedia_dll).resolve()
+        usb3000_dll = (repo_root / config.daq.usb3000_dll).resolve()
         return {
             "python_executable": sys.executable,
             "python_version": sys.version,
@@ -82,8 +84,11 @@ def create_app(config: AppConfig | None = None, repo_root: Path | None = None) -
             "backend_port": config.port,
             "camera_device_index": config.camera.device_index,
             "daq_device_index": config.daq.device_index,
-            "dxmedia_dll": str((repo_root / config.camera.dxmedia_dll).resolve()),
-            "usb3000_dll": str((repo_root / config.daq.usb3000_dll).resolve()),
+            "vendor_arch": os.getenv("MRC_VENDOR_ARCH", "default-x64"),
+            "dxmedia_dll": str(dxmedia_dll),
+            "dxmedia_dll_exists": dxmedia_dll.exists(),
+            "usb3000_dll": str(usb3000_dll),
+            "usb3000_dll_exists": usb3000_dll.exists(),
         }
 
     @app.post("/initialize")

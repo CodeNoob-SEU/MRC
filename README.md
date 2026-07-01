@@ -96,6 +96,21 @@ The old `MRC代码/AppExe/VCDemo.exe` is a 32-bit demo. This app uses the x64 SD
 
 If the x64 vendor demo also fails to open the camera while the 32-bit old demo works, install/repair the x64 camera driver/runtime or run this app through a 32-bit helper design. A 64-bit Python process cannot load the 32-bit `DXMediaCap.dll`.
 
+To run the backend with 32-bit Python and the win32/x86 SDK DLLs:
+
+```powershell
+.\scripts\setup_windows_x86.ps1
+.\scripts\run_real_windows_x86.ps1
+```
+
+This keeps Electron/Vue unchanged but starts the Python backend from `backend\.venv32`.
+
+To test the committed win32 vendor demo directly:
+
+```powershell
+.\scripts\run_vendor_camera_win32_demo.ps1
+```
+
 Runtime details can be checked with:
 
 ```powershell
