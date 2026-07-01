@@ -7,8 +7,9 @@ import ctypes
 import os
 import platform
 import tempfile
+import threading
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from urllib.parse import quote
 
 from ..config import CameraConfig, resolve_path
@@ -23,6 +24,10 @@ class DeviceTag(ctypes.Structure):
         ("idx", ctypes.c_uint),
         ("deviceName", ctypes.c_char * 128),
     ]
+
+
+COINIT_APARTMENTTHREADED = 0x2
+RPC_E_CHANGED_MODE = -2147417850
 
 
 def signed_u32(value: int) -> int:
@@ -47,6 +52,7 @@ class CameraStatus:
     device_name: str = ""
     frame_mapping_mode: str = "estimated_fps"
     active_file: Optional[str] = None
+    com_status: str = ""
 
 
 class BaseCamera:
@@ -141,12 +147,15 @@ class DXMediaCamera(BaseCamera):
         self._handle: Optional[ctypes.c_void_p] = None
         self._status = CameraStatus(mode="real")
         self._runtime_dir_added = False
+        self._com_initialized_threads: Set[int] = set()
+        self._com_lock = threading.Lock()
 
     def _load(self) -> ctypes.CDLL:
         if platform.system() != "Windows":
             raise CameraError("DXMediaCap.dll can only be loaded on Windows.")
         if not self.dll_path.exists():
             raise CameraError(f"DXMediaCap.dll not found: {self.dll_path}")
+        self._ensure_com_initialized()
         if self._dll is None:
             if hasattr(os, "add_dll_directory") and not self._runtime_dir_added:
                 os.add_dll_directory(str(self.dll_path.parent))
@@ -158,6 +167,32 @@ class DXMediaCamera(BaseCamera):
             self._dll = win_dll(str(self.dll_path))
             self._configure_signatures(self._dll)
         return self._dll
+
+    def _ensure_com_initialized(self) -> None:
+        if platform.system() != "Windows":
+            return
+        thread_id = threading.get_ident()
+        with self._com_lock:
+            if thread_id in self._com_initialized_threads:
+                return
+
+        ole32 = ctypes.windll.ole32
+        ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        ole32.CoInitializeEx.restype = ctypes.c_long
+        result = int(ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED))
+        if result in (0, 1):
+            with self._com_lock:
+                self._com_initialized_threads.add(thread_id)
+            self._status.com_status = (
+                "STA initialized for SDK thread"
+                if result == 0
+                else "STA already initialized for SDK thread"
+            )
+            return
+        if result == RPC_E_CHANGED_MODE:
+            self._status.com_status = "COM already initialized with a different apartment"
+            return
+        raise CameraError(f"CoInitializeEx failed with HRESULT {format_sdk_code(result)}")
 
     @staticmethod
     def _configure_signatures(dll: ctypes.CDLL) -> None:
@@ -201,6 +236,7 @@ class DXMediaCamera(BaseCamera):
 
     def enumerate_devices(self) -> List[Dict[str, object]]:
         dll = self._load()
+        self._ensure_com_initialized()
         result = dll.DXInitialize()
         if result != 0:
             raise CameraError(f"DXInitialize failed with code {format_sdk_code(result)}")
@@ -220,6 +256,7 @@ class DXMediaCamera(BaseCamera):
 
     def initialize(self) -> CameraStatus:
         dll = self._load()
+        self._ensure_com_initialized()
         result = dll.DXInitialize()
         if result != 0:
             raise CameraError(f"DXInitialize failed with code {format_sdk_code(result)}")
@@ -266,6 +303,7 @@ class DXMediaCamera(BaseCamera):
     def start_recording(self, output_file: Path) -> CameraStatus:
         if self._handle is None:
             self.initialize()
+        self._ensure_com_initialized()
         assert self._dll is not None
         output_file.parent.mkdir(parents=True, exist_ok=True)
         result = self._dll.DXStartCapture(
@@ -283,6 +321,7 @@ class DXMediaCamera(BaseCamera):
         return self.status()
 
     def stop_recording(self) -> CameraStatus:
+        self._ensure_com_initialized()
         if self._dll is not None and self._handle is not None and self._status.recording:
             result = self._dll.DXStopCapture(self._handle)
             if result != 0:
@@ -291,6 +330,7 @@ class DXMediaCamera(BaseCamera):
         return self.status()
 
     def close(self) -> None:
+        self._ensure_com_initialized()
         if self._dll is not None and self._handle is not None:
             if self._status.recording:
                 self.stop_recording()
@@ -307,6 +347,7 @@ class DXMediaCamera(BaseCamera):
     def preview_frame_data_url(self) -> Optional[str]:
         if self._dll is None or self._handle is None or not self._status.initialized:
             return None
+        self._ensure_com_initialized()
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
             temp_path = Path(temp_file.name)
         try:
