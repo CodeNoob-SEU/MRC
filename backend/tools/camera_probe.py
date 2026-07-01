@@ -136,6 +136,19 @@ def configure_signatures(dll: ctypes.CDLL) -> None:
         ctypes.c_float,
     ]
     dll.DXSetVideoPara.restype = ctypes.c_uint
+    dll.DXGetVideoSources.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(ctypes.c_ubyte),
+    ]
+    dll.DXGetVideoSources.restype = ctypes.c_uint
+    dll.DXSetVideoSource.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    dll.DXSetVideoSource.restype = ctypes.c_uint
+    dll.DXSetVideoSourceEx.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    dll.DXSetVideoSourceEx.restype = ctypes.c_uint
+    dll.DXGetSignalPresent.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint)]
+    dll.DXGetSignalPresent.restype = ctypes.c_uint
     dll.DXSetVideoCodec.argtypes = [ctypes.c_void_p, ctypes.POINTER(DeviceTag)]
     dll.DXSetVideoCodec.restype = ctypes.c_uint
     dll.DXDeviceRun.argtypes = [ctypes.c_void_p]
@@ -258,6 +271,40 @@ def choose_codec(dll: ctypes.CDLL, handle: ctypes.c_void_p, requested: str) -> D
     }
 
 
+def get_video_sources(dll: ctypes.CDLL, handle: ctypes.c_void_p) -> Dict[str, Any]:
+    current = ctypes.c_uint(0)
+    sources = (ctypes.c_uint * 16)()
+    count = ctypes.c_ubyte(16)
+    result = int(dll.DXGetVideoSources(handle, ctypes.byref(current), sources, ctypes.byref(count)))
+    return {
+        "result": format_code(result),
+        "current": int(current.value),
+        "sources": [int(sources[index]) for index in range(int(count.value))] if result == 0 else [],
+        "count": int(count.value),
+        "ok": result == 0,
+    }
+
+
+def get_signal_present(dll: ctypes.CDLL, handle: ctypes.c_void_p) -> Dict[str, Any]:
+    signal = ctypes.c_uint(0)
+    result = int(dll.DXGetSignalPresent(handle, ctypes.byref(signal)))
+    return {"result": format_code(result), "signal": int(signal.value), "ok": result == 0}
+
+
+def set_video_source(dll: ctypes.CDLL, handle: ctypes.c_void_p, source: Dict[str, Any]) -> Dict[str, Any]:
+    method = source["method"]
+    value = int(source["value"])
+    if method == "current":
+        return {"method": method, "value": None, "result": "skipped", "ok": True}
+    if method == "legacy":
+        result = int(dll.DXSetVideoSource(handle, value))
+    elif method == "ex":
+        result = int(dll.DXSetVideoSourceEx(handle, value))
+    else:
+        raise ValueError(f"unknown source method: {method}")
+    return {"method": method, "value": value, "result": format_code(result), "ok": result == 0}
+
+
 def check_file(path: Path, min_size: int = 512) -> Dict[str, Any]:
     exists = path.exists()
     size = path.stat().st_size if exists else 0
@@ -289,7 +336,12 @@ def save_jpg(
     )
 
 
-def open_device(dll: ctypes.CDLL, args: argparse.Namespace, profile: Dict[str, Any]) -> Tuple[ctypes.c_void_p, Dict[str, Any]]:
+def open_device(
+    dll: ctypes.CDLL,
+    args: argparse.Namespace,
+    profile: Dict[str, Any],
+    source: Dict[str, Any],
+) -> Tuple[ctypes.c_void_p, Dict[str, Any]]:
     init_result = int(dll.DXInitialize())
     if init_result != 0:
         raise RuntimeError(f"DXInitialize failed: {format_code(init_result)}")
@@ -302,6 +354,10 @@ def open_device(dll: ctypes.CDLL, args: argparse.Namespace, profile: Dict[str, A
         raise RuntimeError(f"DXOpenDevice failed: {format_code(open_err.value)}")
     handle = ctypes.c_void_p(raw_handle)
     device_name = dll.DXGetDeviceName(handle)
+    sources_before = get_video_sources(dll, handle)
+    source_set = set_video_source(dll, handle, source)
+    sources_after = get_video_sources(dll, handle)
+    signal_before_run = get_signal_present(dll, handle)
     set_result = int(
         dll.DXSetVideoPara(
             handle,
@@ -319,6 +375,11 @@ def open_device(dll: ctypes.CDLL, args: argparse.Namespace, profile: Dict[str, A
         "device_count": count,
         "device_name": device_name.decode("mbcs", errors="replace") if device_name else "",
         "profile": profile,
+        "source": source,
+        "sources_before": sources_before,
+        "source_set": source_set,
+        "sources_after": sources_after,
+        "signal_before_run": signal_before_run,
         "codec": codec,
     }
 
@@ -466,10 +527,14 @@ def strategy_get_buf(dll: ctypes.CDLL, handle: ctypes.c_void_p, out_file: Path, 
             int(height.value),
             int(width.value) * 3,
         )
+    sample = bytes(frame_buffer[: min(len(frame_buffer), 6000)])
     return {
         "result": format_code(result),
         "width": int(width.value),
         "height": int(height.value),
+        "sample_min": min(sample) if sample else None,
+        "sample_max": max(sample) if sample else None,
+        "sample_unique_count": len(set(sample)) if sample else 0,
         "save_result": format_code(save_result) if save_result is not None else None,
         "file": check_file(out_file),
         "ok": result == 0 and save_result == 0 and check_file(out_file)["ok"],
@@ -602,16 +667,40 @@ def profiles_from_args(args: argparse.Namespace) -> List[Dict[str, Any]]:
     ]
 
 
-def run_profile(dll: ctypes.CDLL, args: argparse.Namespace, profile: Dict[str, Any], profile_dir: Path) -> Dict[str, Any]:
+def sources_from_args(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    raw_sources = [item.strip() for item in args.sources.split(",") if item.strip()]
+    methods = [item.strip() for item in args.source_methods.split(",") if item.strip()]
+    sources: List[Dict[str, Any]] = []
+    for raw_source in raw_sources:
+        if raw_source.lower() == "current":
+            sources.append({"name": "current", "method": "current", "value": None})
+            continue
+        value = int(raw_source)
+        for method in methods:
+            label = {1: "AV1", 2: "AV2", 3: "SVIDEO"}.get(value, str(value))
+            sources.append({"name": f"{method}_{label}", "method": method, "value": value})
+    return sources
+
+
+def run_profile(
+    dll: ctypes.CDLL,
+    args: argparse.Namespace,
+    profile: Dict[str, Any],
+    source: Dict[str, Any],
+    profile_dir: Path,
+) -> Dict[str, Any]:
     profile_dir.mkdir(parents=True, exist_ok=True)
-    report: Dict[str, Any] = {"profile": profile, "steps": {}, "ok": False}
+    report: Dict[str, Any] = {"profile": profile, "source": source, "steps": {}, "ok": False}
     for run_name, use_ex in [("run_ex", True), ("run", False)]:
         handle = None
         try:
-            handle, open_info = open_device(dll, args, profile)
+            handle, open_info = open_device(dll, args, profile, source)
             report["steps"][f"{run_name}_open"] = open_info
             run_result = run_device(dll, handle, use_ex)
-            report["steps"][run_name] = {"result": format_code(run_result)}
+            report["steps"][run_name] = {
+                "result": format_code(run_result),
+                "signal_after_run": get_signal_present(dll, handle),
+            }
             time.sleep(args.settle_seconds)
             if run_result != 0:
                 continue
@@ -675,6 +764,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--standard", type=int, default=int(os.getenv("MRC_CAMERA_VIDEO_STANDARD", "32")))
     parser.add_argument("--colorspace", type=int, default=int(os.getenv("MRC_CAMERA_COLORSPACE", str(CS_YUY2))))
     parser.add_argument("--codec", default=os.getenv("MRC_CAMERA_VIDEO_CODEC", "x264 Codec"))
+    parser.add_argument(
+        "--sources",
+        default=os.getenv("MRC_CAMERA_SOURCES", "1,2"),
+        help="Comma-separated source values. Legacy DXSetVideoSource uses 1=AV1, 2=AV2, 3=SVIDEO. Use current to skip setting.",
+    )
+    parser.add_argument(
+        "--source-methods",
+        default=os.getenv("MRC_CAMERA_SOURCE_METHODS", "legacy,ex"),
+        help="Comma-separated source set methods: legacy, ex.",
+    )
     parser.add_argument("--settle-seconds", type=float, default=1.0)
     parser.add_argument("--capture-seconds", type=float, default=2.0)
     parser.add_argument("--stop-on-first", action="store_true")
@@ -715,11 +814,15 @@ def main() -> int:
     print(f"Codecs: {codecs}")
 
     for profile in profiles_from_args(args):
-        print(f"\n[PROFILE] {profile}")
-        profile_report = run_profile(dll, args, profile, out_dir / str(profile["name"]))
-        report["profiles"].append(profile_report)
-        report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-        if args.stop_on_first and profile_report.get("ok"):
+        for source in sources_from_args(args):
+            print(f"\n[PROFILE] {profile} [SOURCE] {source}")
+            profile_dir = out_dir / f"{profile['name']}__{source['name']}"
+            profile_report = run_profile(dll, args, profile, source, profile_dir)
+            report["profiles"].append(profile_report)
+            report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+            if args.stop_on_first and profile_report.get("ok"):
+                break
+        if args.stop_on_first and report["profiles"] and report["profiles"][-1].get("ok"):
             break
 
     ok_files = []

@@ -76,6 +76,21 @@ To test only one profile:
 .\scripts\camera_probe_windows_x86.ps1 --profile custom --width 768 --height 576 --fps 25 --colorspace 2
 ```
 
+For AV1/AV2 input testing, start with the two profiles that usually produce a frame buffer:
+
+```powershell
+.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 576 --fps 25 --colorspace 2 --sources 1,2 --source-methods legacy
+.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 576 --fps 30 --colorspace 2 --sources 1,2 --source-methods legacy
+```
+
+If both are still green, test the newer source-index API:
+
+```powershell
+.\scripts\camera_probe_windows_x86.ps1 --profile custom --width 720 --height 576 --fps 25 --colorspace 2 --sources 0,1,2,3 --source-methods ex
+```
+
+In the report, check `signal_after_run.signal`: `1` means that source has a video signal, `0` means signal loss.
+
 To stop after the first non-empty candidate file:
 
 ```powershell
