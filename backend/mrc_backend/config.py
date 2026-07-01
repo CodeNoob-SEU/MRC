@@ -45,6 +45,7 @@ class AppConfig:
     port: int = 7876
     output_root: str = "runs"
     window_minutes: float = 6.0
+    post_window_record_seconds: float = 1.0
     video_trim_enabled: bool = True
     video_trim_mode: str = "reencode"
     ffmpeg_path: str = ""
@@ -58,6 +59,9 @@ class AppConfig:
         config.host = os.getenv("MRC_BACKEND_HOST", config.host)
         config.port = int(os.getenv("MRC_BACKEND_PORT", str(config.port)))
         config.output_root = os.getenv("MRC_OUTPUT_ROOT", config.output_root)
+        config.post_window_record_seconds = float(
+            os.getenv("MRC_POST_WINDOW_RECORD_SECONDS", str(config.post_window_record_seconds))
+        )
         config.video_trim_enabled = os.getenv(
             "MRC_VIDEO_TRIM_ENABLED",
             str(config.video_trim_enabled),

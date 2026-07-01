@@ -260,6 +260,15 @@ $env:MRC_VIDEO_TRIM_MODE="copy"
 If `ffmpeg` is not available, the experiment still completes and records the reason under `alignment.json` -> `video_trim`.
 When ffmpeg is available, the backend also extracts `aligned_first_frame.jpg` and `aligned_last_frame.jpg` into the same experiment output folder for timing checks. Extraction details are recorded under `alignment.json` -> `frame_extract`.
 
+After the DAQ reaches the theoretical Trigger window end, the app stops DAQ sampling but keeps the camera recording for an extra post-window buffer. The default is 1 second:
+
+```powershell
+$env:MRC_POST_WINDOW_RECORD_SECONDS="1"
+.\scripts\run_real_windows_x86.ps1
+```
+
+This extra video is only source material for trimming. `alignment.json`, `frame_map.csv`, and `mrc_recording_aligned.mp4` still use the theoretical window length, for example `60.000 s` and `1800` frames at 30 FPS.
+
 The Windows run scripts use backend port `7876` by default. Before startup, they automatically kill any existing process listening on that port. To override the port:
 
 ```powershell

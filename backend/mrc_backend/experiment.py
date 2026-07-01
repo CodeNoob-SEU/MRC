@@ -364,6 +364,21 @@ class ExperimentCoordinator:
         self._status.daq = asdict(self.daq.status())
         self._worker = None
 
+    def _finalize_trigger_capture_locked(self, state: str = "finalizing") -> None:
+        self.daq.stop_sampling()
+        self._status.state = state
+        self._status.camera = asdict(self.camera.status())
+        self._status.daq = asdict(self.daq.status())
+
+    def _stop_camera_after_post_window_buffer(self) -> None:
+        buffer_seconds = max(0.0, float(self.config.post_window_record_seconds))
+        deadline = time.monotonic() + buffer_seconds
+        while time.monotonic() < deadline and not self._stop_event.is_set():
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        self.camera.stop_recording()
+        with self._lock:
+            self._status.camera = asdict(self.camera.status())
+
     def _acquisition_loop(self, output_dir: Path, sync_context: SyncStartContext) -> None:
         trigger_csv = output_dir / "triggers.csv"
         db_path = output_dir / "triggers.sqlite3"
@@ -531,17 +546,26 @@ class ExperimentCoordinator:
                         if alignment is not None:
                             alignment["stop_overshoot_samples"] = stop_overshoot_samples
                             alignment["stop_overshoot_seconds"] = stop_overshoot_samples / self.config.daq.sample_rate_hz
+                            alignment["post_window_record_seconds"] = max(
+                                0.0,
+                                float(self.config.post_window_record_seconds),
+                            )
                             alignment["finished_at_log_time"] = datetime.now().isoformat(timespec="milliseconds")
                         with self._lock:
                             self._status.stop_overshoot_samples = stop_overshoot_samples
-                            self._status.video_trim_status = "trimming"
-                            self._set_finished_locked("finalizing")
+                            self._status.video_trim_status = "post_recording"
+                            self._finalize_trigger_capture_locked("finalizing")
                         self.event_bus.publish("status", self.status_dict())
                         if alignment is not None:
+                            self._stop_camera_after_post_window_buffer()
+                            with self._lock:
+                                self._status.video_trim_status = "trimming"
+                            self.event_bus.publish("status", self.status_dict())
                             self._finalize_aligned_video(alignment_path, alignment)
                             self._write_alignment(alignment_path, alignment)
                             with self._lock:
                                 self._status.state = "finished"
+                                self._worker = None
                             self.event_bus.publish("status", self.status_dict())
                         return
         except Exception as exc:  # noqa: BLE001
@@ -616,15 +640,75 @@ class ExperimentCoordinator:
             alignment_path.with_name("events.jsonl"),
             {"type": "video_trim", "payload": trim_result},
         )
+        alignment["video_validation"] = self._validate_aligned_video(alignment, trim_result)
         frame_extract = self._extract_alignment_check_frames(alignment_path, alignment, trim_result)
         alignment["frame_extract"] = frame_extract
-        if frame_extract.get("status") == "ok":
+        if frame_extract.get("status") in {"ok", "warning"}:
             alignment["files"]["aligned_first_frame"] = Path(str(frame_extract["first_frame_file"])).name
             alignment["files"]["aligned_last_frame"] = Path(str(frame_extract["last_frame_file"])).name
         self._append_jsonl(
             alignment_path.with_name("events.jsonl"),
             {"type": "frame_extract", "payload": frame_extract},
         )
+
+    def _validate_aligned_video(self, alignment: Dict[str, Any], trim_result: Dict[str, Any]) -> Dict[str, Any]:
+        ffprobe = self._resolve_ffprobe_executable()
+        if trim_result.get("status") != "ok":
+            return {
+                "status": "not_checked",
+                "warning": "Aligned video was not created.",
+            }
+        if not ffprobe:
+            return {
+                "status": "not_checked",
+                "warning": "Video frame count validation requires ffprobe.",
+            }
+        video_file = Path(str(trim_result["output_file"]))
+        command = [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames,nb_frames,r_frame_rate,avg_frame_rate,duration",
+            "-of",
+            "json",
+            str(video_file),
+        ]
+        try:
+            completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=120)
+            data = json.loads(completed.stdout)
+            stream = data["streams"][0]
+            actual_frames = int(stream.get("nb_read_frames") or stream.get("nb_frames") or 0)
+            actual_duration = float(stream.get("duration") or 0.0)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "status": "failed",
+                "warning": f"ffprobe validation failed: {exc}",
+                "command": command,
+            }
+        expected_frames = int(alignment["expected_total_frames"])
+        expected_duration = float(alignment["window_seconds"])
+        frame_delta = actual_frames - expected_frames
+        duration_delta = actual_duration - expected_duration
+        status = "ok" if frame_delta == 0 else "warning"
+        result: Dict[str, Any] = {
+            "status": status,
+            "expected_frames": expected_frames,
+            "actual_frames": actual_frames,
+            "frame_delta": frame_delta,
+            "expected_duration_seconds": expected_duration,
+            "actual_duration_seconds": actual_duration,
+            "duration_delta_seconds": duration_delta,
+            "r_frame_rate": stream.get("r_frame_rate"),
+            "avg_frame_rate": stream.get("avg_frame_rate"),
+            "command": command,
+        }
+        if status != "ok":
+            result["warning"] = "Aligned video frame count differs from theoretical frame count."
+        return result
 
     def _trim_video_from_t0(
         self,
@@ -814,6 +898,24 @@ class ExperimentCoordinator:
                 "first_timestamp_seconds": first_seconds,
                 "last_timestamp_seconds": last_seconds,
             }
+        if first_result["status"] == "ok" and last_result["status"] != "ok":
+            fallback_last_result = self._extract_video_tail_frame(
+                ffmpeg=ffmpeg,
+                video_source=video_source,
+                output_file=last_frame,
+            )
+            if fallback_last_result["status"] == "ok":
+                return {
+                    "status": "warning",
+                    "warning": "Theoretical last-frame extraction failed; extracted the actual video tail frame instead.",
+                    "timing_source": timing_source,
+                    "video_source": str(video_source),
+                    "first_frame_file": str(first_frame),
+                    "last_frame_file": str(last_frame),
+                    "first_timestamp_seconds": first_seconds,
+                    "last_timestamp_seconds": last_seconds,
+                    "last_frame_fallback": fallback_last_result,
+                }
         return {
             "status": "failed",
             "timing_source": timing_source,
@@ -867,6 +969,51 @@ class ExperimentCoordinator:
             "command": command,
         }
 
+    @staticmethod
+    def _extract_video_tail_frame(
+        *,
+        ffmpeg: str,
+        video_source: Path,
+        output_file: Path,
+    ) -> Dict[str, Any]:
+        command = [
+            ffmpeg,
+            "-y",
+            "-sseof",
+            "-0.050",
+            "-i",
+            str(video_source),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            "-update",
+            "1",
+            str(output_file),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "failed", "error": str(exc), "command": command}
+        if completed.returncode == 0 and output_file.exists() and output_file.stat().st_size > 0:
+            return {
+                "status": "ok",
+                "output_file": str(output_file),
+                "command": command,
+            }
+        return {
+            "status": "failed",
+            "returncode": completed.returncode,
+            "stderr_tail": completed.stderr[-2000:],
+            "command": command,
+        }
+
     def _resolve_ffmpeg_executable(self) -> Optional[str]:
         if self.config.ffmpeg_path:
             return self.config.ffmpeg_path
@@ -874,6 +1021,17 @@ class ExperimentCoordinator:
         if bundled.exists():
             return str(bundled)
         return shutil.which("ffmpeg")
+
+    def _resolve_ffprobe_executable(self) -> Optional[str]:
+        if self.config.ffmpeg_path:
+            ffmpeg_path = Path(self.config.ffmpeg_path)
+            ffprobe_path = ffmpeg_path.with_name("ffprobe.exe" if ffmpeg_path.suffix.lower() == ".exe" else "ffprobe")
+            if ffprobe_path.exists():
+                return str(ffprobe_path)
+        bundled = self.repo_root / "vendor" / "ffmpeg" / "windows" / "bin" / "ffprobe.exe"
+        if bundled.exists():
+            return str(bundled)
+        return shutil.which("ffprobe")
 
     def _build_alignment_metadata(
         self,

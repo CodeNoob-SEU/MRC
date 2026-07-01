@@ -89,6 +89,7 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
             "hardware_mode": config.hardware_mode,
             "backend_host": config.host,
             "backend_port": config.port,
+            "post_window_record_seconds": config.post_window_record_seconds,
             "video_trim_enabled": config.video_trim_enabled,
             "video_trim_mode": config.video_trim_mode,
             "ffmpeg_path": config.ffmpeg_path,
