@@ -18,20 +18,25 @@ From a fresh clone:
 
 ```powershell
 cd mrc_integrated_app
-.\scripts\setup_windows.ps1
-.\scripts\run_mock_windows.ps1
+.\scripts\init_windows.ps1
+.\scripts\run_windows.ps1
 ```
 
 Run scripts from the repository root. The scripts temporarily enter `backend/` and `frontend/`, then return to the original directory even if a command fails.
 
-For real hardware mode:
+`init_windows.ps1` is the one-time new-machine setup script. It installs the bundled Windows ffmpeg runtime, creates `backend\.venv32` with 32-bit Python, installs Python and Node dependencies, and runs a build check.
+
+`run_windows.ps1` is the normal startup script. By default it runs real hardware mode with the win32 camera SDK, backend port `7876`, camera device `0`, DAQ device `0`, AV1/source `0`, NTSC `720x480 @ 30 fps`, and MP4 capture.
+
+Useful run options:
 
 ```powershell
-cd mrc_integrated_app
-.\scripts\run_real_windows.ps1
+.\scripts\run_windows.ps1 -VideoSourceIndex 1
+.\scripts\run_windows.ps1 -CaptureFormat avi
+.\scripts\run_windows.ps1 -Mode mock
 ```
 
-Real mode expects installed camera and USB3000 drivers and 64-bit Python.
+Real mode expects installed camera and USB3000 drivers. This project defaults to 32-bit Python on Windows because the working vendor demo and SDK path are win32.
 
 ## Hardware Diagnostics
 
@@ -132,35 +137,28 @@ If the camera reports `DXOpenDevice failed with code -3 (unsigned=4294967293, he
 - the vendor camera demo can open the camera;
 - no other program is occupying the camera;
 - the camera driver is installed;
-- the app is running with 64-bit Python;
-- `vendor/camera/x64/` contains the SDK DLL dependencies.
+- the app was initialized with `.\scripts\init_windows.ps1`;
+- the app is running with the default win32 SDK path from `.\scripts\run_windows.ps1`.
 
 If the diagnostics response lists devices but the selected device fails to open, try a different index:
 
 ```powershell
-$env:MRC_CAMERA_DEVICE_INDEX="1"
-.\scripts\run_real_windows.ps1
+.\scripts\run_windows.ps1 -CameraDeviceIndex 1
 ```
 
-If the old vendor software that works is 32-bit, also test the vendor x64 demo from the original SDK. This app uses 64-bit Python and the x64 SDK DLLs.
-
-The old `MRC代码/AppExe/VCDemo.exe` is a 32-bit demo. This app uses the x64 SDK. To test the same x64 camera runtime shipped in this repository:
-
-```powershell
-.\scripts\run_vendor_camera_x64_demo.ps1
-```
-
-If the x64 vendor demo also fails to open the camera while the 32-bit old demo works, install/repair the x64 camera driver/runtime or run this app through a 32-bit helper design. A 64-bit Python process cannot load the 32-bit `DXMediaCap.dll`.
-
-To run the backend with 32-bit Python and the win32/x86 SDK DLLs:
+The normal Windows path uses 32-bit Python and the win32 SDK because the working vendor demo is 32-bit. The old lower-level x86 scripts are still available for debugging:
 
 ```powershell
 .\scripts\setup_windows_x86.ps1
 .\scripts\run_real_windows_x86.ps1
 ```
 
-This keeps Electron/Vue unchanged but starts the Python backend from `backend\.venv32`.
-The setup script prefers Python 3.10 32-bit (`py -3.10-32`) and falls back to any installed 32-bit Python (`py -3-32`). The backend code is compatible with Python 3.9 or newer.
+The consolidated scripts are preferred for a new machine:
+
+```powershell
+.\scripts\init_windows.ps1
+.\scripts\run_windows.ps1
+```
 
 Before setup, verify that the Python launcher can find a 32-bit runtime:
 
@@ -169,17 +167,25 @@ py -0p
 py -3.10-32 --version
 ```
 
+The setup script prefers Python 3.10 32-bit (`py -3.10-32`) and falls back to any installed 32-bit Python (`py -3-32`). The backend code is compatible with Python 3.9 or newer.
+
 If `py -3.10-32` is not available, install the Windows x86 Python installer from python.org. You can also point the setup script at a specific 32-bit Python executable:
 
 ```powershell
 $env:MRC_PYTHON32="C:\Users\dell\AppData\Local\Programs\Python\Python310-32\python.exe"
-.\scripts\setup_windows_x86.ps1
+.\scripts\init_windows.ps1
 ```
 
 To test the committed win32 vendor demo directly:
 
 ```powershell
 .\scripts\run_vendor_camera_win32_demo.ps1
+```
+
+To compare the x64 vendor runtime manually:
+
+```powershell
+.\scripts\run_vendor_camera_x64_demo.ps1
 ```
 
 Runtime details can be checked with:
@@ -206,15 +212,13 @@ The Python camera adapter follows the working VC demo order: `DXOpenDevice`, `DX
 To test AV2 in the main app:
 
 ```powershell
-$env:MRC_CAMERA_VIDEO_SOURCE_INDEX="1"
-.\scripts\run_real_windows_x86.ps1
+.\scripts\run_windows.ps1 -VideoSourceIndex 1
 ```
 
 If MP4 recording still fails on a specific machine, test AVI without changing code:
 
 ```powershell
-$env:MRC_CAMERA_CAPTURE_FORMAT="1"
-.\scripts\run_real_windows_x86.ps1
+.\scripts\run_windows.ps1 -CaptureFormat avi
 ```
 
 The UI supports two recording modes:
@@ -233,13 +237,13 @@ Automatic trimming uses `ffmpeg`. Install it into `PATH`, or set an explicit pat
 
 ```powershell
 $env:MRC_FFMPEG="C:\Tools\ffmpeg\bin\ffmpeg.exe"
-.\scripts\run_real_windows_x86.ps1
+.\scripts\run_windows.ps1
 ```
 
-The Windows setup scripts also install a bundled ffmpeg runtime automatically:
+The Windows initialization script installs a bundled ffmpeg runtime automatically:
 
 ```powershell
-.\scripts\setup_ffmpeg_windows.ps1
+.\scripts\init_windows.ps1
 ```
 
 That creates:
@@ -248,13 +252,13 @@ That creates:
 vendor\ffmpeg\windows\bin\ffmpeg.exe
 ```
 
-The real-mode run scripts prefer this bundled executable when `MRC_FFMPEG` is not already set.
+The run script prefers this bundled executable when `MRC_FFMPEG` is not already set.
 
 By default trimming uses re-encoding for a more accurate t0 cut, with stream-copy as a fallback. To force faster keyframe-based stream copy:
 
 ```powershell
 $env:MRC_VIDEO_TRIM_MODE="copy"
-.\scripts\run_real_windows_x86.ps1
+.\scripts\run_windows.ps1
 ```
 
 If `ffmpeg` is not available, the experiment still completes and records the reason under `alignment.json` -> `video_trim`.
@@ -264,7 +268,7 @@ After the DAQ reaches the theoretical Trigger window end, the app stops DAQ samp
 
 ```powershell
 $env:MRC_POST_WINDOW_RECORD_SECONDS="1"
-.\scripts\run_real_windows_x86.ps1
+.\scripts\run_windows.ps1
 ```
 
 This extra video is only source material for trimming. `alignment.json`, `frame_map.csv`, and `mrc_recording_aligned.mp4` still use the theoretical window length, for example `60.000 s` and `1800` frames at 30 FPS.
@@ -272,15 +276,14 @@ This extra video is only source material for trimming. `alignment.json`, `frame_
 The Windows run scripts use backend port `7876` by default. Before startup, they automatically kill any existing process listening on that port. To override the port:
 
 ```powershell
-$env:MRC_BACKEND_PORT="7877"
-.\scripts\run_real_windows.ps1
+.\scripts\run_windows.ps1 -Port 7877
 ```
 
 Backend shutdown is deadline-protected because some camera SDK calls can block during preview/capture teardown. By default the backend waits up to 4 seconds for graceful hardware cleanup, then forces the Python process to exit so the port is released:
 
 ```powershell
 $env:MRC_SHUTDOWN_TIMEOUT_SECONDS="4"
-.\scripts\run_real_windows_x86.ps1
+.\scripts\run_windows.ps1
 ```
 
 Electron also runs `taskkill /T /F` for its backend child on quit. If a stale backend is still listening before startup, `scripts\ensure_backend_port_windows.ps1` kills the listener PID before launching a new backend.

@@ -1,0 +1,79 @@
+param(
+  [ValidateSet("real", "mock")]
+  [string]$Mode = "real",
+  [int]$Port = 7876,
+  [int]$CameraDeviceIndex = 0,
+  [int]$DaqDeviceIndex = 0,
+  [int]$VideoSourceIndex = 0,
+  [ValidateSet("mp4", "avi")]
+  [string]$CaptureFormat = "mp4"
+)
+
+$ErrorActionPreference = "Stop"
+
+if ($PSVersionTable.Platform -and $PSVersionTable.Platform -ne "Win32NT") {
+  throw "This run script is intended for Windows PowerShell."
+}
+
+$repoRoot = (Resolve-Path "$PSScriptRoot\..").Path
+$frontendDir = Join-Path $repoRoot "frontend"
+$pythonExe = Join-Path $repoRoot "backend\.venv32\Scripts\python.exe"
+$ffmpegExe = Join-Path $repoRoot "vendor\ffmpeg\windows\bin\ffmpeg.exe"
+
+if (!(Test-Path $pythonExe)) {
+  throw "32-bit backend environment was not found. Run .\scripts\init_windows.ps1 first."
+}
+
+if (!(Test-Path (Join-Path $frontendDir "node_modules"))) {
+  throw "Frontend dependencies were not found. Run .\scripts\init_windows.ps1 first."
+}
+
+$env:MRC_HARDWARE_MODE = $Mode
+$env:MRC_BACKEND_PORT = [string]$Port
+$env:MRC_PYTHON = (Resolve-Path $pythonExe).Path
+
+if ($Mode -eq "real") {
+  $env:MRC_VENDOR_ARCH = "win32"
+  $env:MRC_CAMERA_DEVICE_INDEX = [string]$CameraDeviceIndex
+  $env:MRC_DAQ_DEVICE_INDEX = [string]$DaqDeviceIndex
+  $env:MRC_CAMERA_VIDEO_SOURCE_INDEX = [string]$VideoSourceIndex
+  $env:MRC_CAMERA_WIDTH = if ($env:MRC_CAMERA_WIDTH) { $env:MRC_CAMERA_WIDTH } else { "720" }
+  $env:MRC_CAMERA_HEIGHT = if ($env:MRC_CAMERA_HEIGHT) { $env:MRC_CAMERA_HEIGHT } else { "480" }
+  $env:MRC_CAMERA_FPS = if ($env:MRC_CAMERA_FPS) { $env:MRC_CAMERA_FPS } else { "30" }
+  $env:MRC_CAMERA_VIDEO_STANDARD = if ($env:MRC_CAMERA_VIDEO_STANDARD) { $env:MRC_CAMERA_VIDEO_STANDARD } else { "1" }
+  $env:MRC_CAMERA_COLORSPACE = if ($env:MRC_CAMERA_COLORSPACE) { $env:MRC_CAMERA_COLORSPACE } else { "2" }
+  $env:MRC_CAMERA_CAPTURE_FORMAT = if ($CaptureFormat -eq "avi") { "1" } else { "2" }
+  $env:MRC_CAMERA_VIDEO_CODEC = if ($env:MRC_CAMERA_VIDEO_CODEC) { $env:MRC_CAMERA_VIDEO_CODEC } else { "x264 Codec" }
+  $env:MRC_CAMERA_PREVIEW_MODE = if ($env:MRC_CAMERA_PREVIEW_MODE) { $env:MRC_CAMERA_PREVIEW_MODE } else { "2" }
+  $env:MRC_CAMERA_PREVIEW_FPS = if ($env:MRC_CAMERA_PREVIEW_FPS) { $env:MRC_CAMERA_PREVIEW_FPS } else { "0" }
+}
+
+if (!$env:MRC_FFMPEG -and (Test-Path $ffmpegExe)) {
+  $env:MRC_FFMPEG = (Resolve-Path $ffmpegExe).Path
+}
+
+Write-Host "Starting MRC Integrated Acquisition" -ForegroundColor Cyan
+Write-Host "  Mode:             $Mode"
+Write-Host "  Backend port:     $env:MRC_BACKEND_PORT"
+Write-Host "  Python:           $env:MRC_PYTHON"
+if ($Mode -eq "real") {
+  Write-Host "  Vendor arch:      $env:MRC_VENDOR_ARCH"
+  Write-Host "  Camera index:     $env:MRC_CAMERA_DEVICE_INDEX"
+  Write-Host "  DAQ index:        $env:MRC_DAQ_DEVICE_INDEX"
+  Write-Host "  Video source:     $env:MRC_CAMERA_VIDEO_SOURCE_INDEX"
+  Write-Host "  Camera format:    $env:MRC_CAMERA_WIDTH x $env:MRC_CAMERA_HEIGHT @ $env:MRC_CAMERA_FPS fps"
+}
+if ($env:MRC_FFMPEG) {
+  Write-Host "  FFmpeg:           $env:MRC_FFMPEG"
+} else {
+  Write-Warning "FFmpeg was not found. Aligned trimming and first/last frame extraction will be unavailable."
+}
+
+& "$PSScriptRoot\ensure_backend_port_windows.ps1" -Port $Port
+
+try {
+  Push-Location $frontendDir
+  npm run dev
+} finally {
+  Pop-Location
+}
