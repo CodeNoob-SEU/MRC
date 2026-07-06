@@ -69,9 +69,48 @@ function startBackend(): void {
   });
 }
 
+function requestFastBackendShutdown(): boolean {
+  if (process.env.MRC_FAST_BACKEND_SHUTDOWN === "0") {
+    return false;
+  }
+  try {
+    execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        `$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -UseBasicParsing -Method POST -Uri '${BACKEND_URL}/shutdown-fast' -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }`
+      ],
+      { windowsHide: true, stdio: "ignore", timeout: 3000 }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function stopBackend(): void {
   if (!backendProcess) {
     return;
+  }
+  if (process.platform === "win32" && backendProcess.pid && requestFastBackendShutdown()) {
+    let fastShutdownCompleted = false;
+    try {
+      execFileSync("powershell.exe", ["-NoProfile", "-Command", `Wait-Process -Id ${backendProcess.pid} -Timeout 2`], {
+        windowsHide: true,
+        stdio: "ignore",
+        timeout: 3000
+      });
+      fastShutdownCompleted = true;
+    } catch {
+      // Fall through to taskkill below if the fast shutdown request did not finish the process.
+    }
+    if (fastShutdownCompleted || backendProcess.exitCode !== null || backendProcess.killed) {
+      backendProcess = null;
+      return;
+    }
   }
   if (process.platform === "win32" && backendProcess.pid) {
     try {

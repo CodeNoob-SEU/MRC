@@ -5,6 +5,8 @@ from dataclasses import asdict
 import os
 import platform
 import sys
+import threading
+import time
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -54,6 +56,16 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
 
     @app.on_event("shutdown")
     async def shutdown() -> None:
+        fast_default = "1" if platform.system() == "Windows" else "0"
+        fast_shutdown = os.getenv("MRC_FAST_BACKEND_SHUTDOWN", fast_default).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if fast_shutdown:
+            coordinator.close_fast_without_sdk_teardown()
+            return
         timeout_seconds = float(os.getenv("MRC_SHUTDOWN_TIMEOUT_SECONDS", "4"))
         coordinator.close_with_deadline(timeout_seconds=timeout_seconds)
 
@@ -154,6 +166,16 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
             return asdict(coordinator.stop_experiment())
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/shutdown-fast")
+    def shutdown_fast() -> Dict[str, Any]:
+        def exit_soon() -> None:
+            time.sleep(0.15)
+            coordinator.close_fast_without_sdk_teardown()
+            os._exit(0)
+
+        threading.Thread(target=exit_soon, name="mrc-fast-shutdown", daemon=True).start()
+        return {"ok": True, "mode": "fast_without_camera_sdk_teardown"}
 
     @app.post("/manual-recording/start")
     def start_manual_recording(request: StartManualRecordingRequest) -> Dict[str, Any]:

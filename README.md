@@ -311,7 +311,20 @@ $env:MRC_SHUTDOWN_TIMEOUT_SECONDS="4"
 .\scripts\run_windows.ps1
 ```
 
-Electron also runs `taskkill /T /F` for its backend child on quit. If a stale backend is still listening before startup, `scripts\ensure_backend_port_windows.ps1` kills the listener PID before launching a new backend.
+On Windows, the normal run script enables fast backend shutdown:
+
+```powershell
+$env:MRC_FAST_BACKEND_SHUTDOWN="1"
+```
+
+Fast shutdown skips camera SDK teardown calls such as `DXStopPreview`, `DXDeviceStop`, `DXCloseDevice`, and `DXUninitialize` during application exit. This avoids the most common DirectShow/driver hang path. Stop the experiment from the UI before closing the app so the recording file is finalized first. To debug full SDK cleanup, set:
+
+```powershell
+$env:MRC_FAST_BACKEND_SHUTDOWN="0"
+.\scripts\run_windows.ps1
+```
+
+Electron first asks the backend to use fast shutdown, then falls back to `taskkill /T /F` only if the backend does not exit. If a stale backend is still listening before startup, `scripts\ensure_backend_port_windows.ps1` kills the listener PID before launching a new backend.
 
 If Windows reports `Access is denied` while killing the backend, the stale process was usually started from an elevated or different user session. Run the system-level cleanup script from the repository root:
 
@@ -319,7 +332,13 @@ If Windows reports `Access is denied` while killing the backend, the stale proce
 .\scripts\cleanup_windows_admin.ps1 -Port 7876
 ```
 
-The script asks for Administrator privileges when needed, finds the backend listener on port `7876`, follows its child process tree, and also removes MRC-related Python/Electron/Node processes whose command line points at this repository. If the port is still occupied after this script, reboot Windows to release a process stuck inside the vendor camera driver/COM teardown.
+The script asks for Administrator privileges when needed, finds the backend listener on port `7876`, follows its child process tree, and also removes MRC-related Python/Electron/Node processes whose command line points at this repository. If the process is still stuck, it tries to reset matching PnP capture devices:
+
+```powershell
+.\scripts\cleanup_windows_admin.ps1 -Port 7876 -DeviceNamePattern "ZhongAn|US2000|Video Capture"
+```
+
+Use `Get-PnpDevice | Where-Object FriendlyName -match "Video|Capture|ZhongAn|US2000"` to inspect the exact device names on a new PC. If the port is still occupied after process termination and PnP reset, reboot Windows to release a process stuck inside the vendor camera driver.
 
 ## Backend
 

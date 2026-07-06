@@ -1,7 +1,9 @@
 param(
   [int]$Port = 7876,
+  [string]$DeviceNamePattern = "ZhongAn|US2000|Video Capture",
   [switch]$NoSelfElevate,
-  [switch]$IncludeAllNodeInRepo
+  [switch]$IncludeAllNodeInRepo,
+  [switch]$SkipDeviceReset
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,6 +37,10 @@ function Restart-AsAdministrator {
   if ($IncludeAllNodeInRepo) {
     $arguments += "-IncludeAllNodeInRepo"
   }
+  if ($SkipDeviceReset) {
+    $arguments += "-SkipDeviceReset"
+  }
+  $arguments += @("-DeviceNamePattern", "`"$DeviceNamePattern`"")
   Write-Host "Requesting Administrator privileges for system-level cleanup..."
   Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -Verb RunAs | Out-Null
   exit 0
@@ -170,9 +176,55 @@ function Stop-ProcessHard {
   }
 }
 
+function Get-CaptureDevices {
+  if (!(Get-Command Get-PnpDevice -ErrorAction SilentlyContinue)) {
+    return @()
+  }
+
+  @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+    Where-Object {
+      ($_.FriendlyName -and $_.FriendlyName -match $DeviceNamePattern) -or
+      ($_.InstanceId -and $_.InstanceId -match $DeviceNamePattern)
+    })
+}
+
+function Restart-CaptureDevices {
+  $devices = @(Get-CaptureDevices)
+  if ($devices.Count -eq 0) {
+    Write-Warning "No PnP capture devices matched pattern: $DeviceNamePattern"
+    return
+  }
+
+  Write-Host "Resetting matching PnP capture device(s):"
+  foreach ($device in $devices) {
+    Write-Host "  $($device.FriendlyName) [$($device.InstanceId)]"
+  }
+
+  foreach ($device in $devices) {
+    try {
+      Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop | Out-Null
+    } catch {
+      Write-Warning "Disable-PnpDevice failed for $($device.FriendlyName): $($_.Exception.Message)"
+    }
+  }
+
+  Start-Sleep -Seconds 2
+
+  foreach ($device in $devices) {
+    try {
+      Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop | Out-Null
+    } catch {
+      Write-Warning "Enable-PnpDevice failed for $($device.FriendlyName): $($_.Exception.Message)"
+    }
+  }
+
+  Start-Sleep -Seconds 2
+}
+
 Write-Host "MRC system-level cleanup"
 Write-Host "  Repo: $repoRoot"
 Write-Host "  Backend port: $Port"
+Write-Host "  Device reset pattern: $DeviceNamePattern"
 
 $candidatePids = @(Get-MrcCandidatePids)
 if ($candidatePids.Count -eq 0) {
@@ -187,6 +239,16 @@ foreach ($processId in $candidatePids) {
 
 Start-Sleep -Milliseconds 500
 $remainingListeners = @(Get-PortListeners)
+if ($remainingListeners.Count -gt 0 -and !$SkipDeviceReset) {
+  Write-Warning "Port $Port is still occupied after process termination attempts. Trying PnP capture-device reset..."
+  Restart-CaptureDevices
+  foreach ($processId in @(Get-MrcCandidatePids)) {
+    Stop-ProcessHard -ProcessId ([int]$processId)
+  }
+  Start-Sleep -Milliseconds 500
+  $remainingListeners = @(Get-PortListeners)
+}
+
 if ($remainingListeners.Count -gt 0) {
   $details = foreach ($processId in $remainingListeners) {
     $process = Get-Process -Id $processId -ErrorAction SilentlyContinue

@@ -34,6 +34,7 @@ if (!(Test-Path (Join-Path $frontendDir "node_modules"))) {
 $env:MRC_HARDWARE_MODE = $Mode
 $env:MRC_BACKEND_PORT = [string]$Port
 $env:MRC_PYTHON = (Resolve-Path $pythonExe).Path
+$env:MRC_FAST_BACKEND_SHUTDOWN = if ($env:MRC_FAST_BACKEND_SHUTDOWN) { $env:MRC_FAST_BACKEND_SHUTDOWN } else { "1" }
 
 if ($Mode -eq "real") {
   $env:MRC_VENDOR_ARCH = "win32"
@@ -63,6 +64,7 @@ Write-Host "Starting MRC Integrated Acquisition" -ForegroundColor Cyan
 Write-Host "  Mode:             $Mode"
 Write-Host "  Backend port:     $env:MRC_BACKEND_PORT"
 Write-Host "  Python:           $env:MRC_PYTHON"
+Write-Host "  Fast shutdown:    $env:MRC_FAST_BACKEND_SHUTDOWN"
 if ($Mode -eq "real") {
   Write-Host "  Vendor arch:      $env:MRC_VENDOR_ARCH"
   Write-Host "  Camera index:     $env:MRC_CAMERA_DEVICE_INDEX"

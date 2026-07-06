@@ -372,6 +372,15 @@ class ExperimentCoordinator:
             )
             os._exit(0)
 
+    def close_fast_without_sdk_teardown(self) -> None:
+        self._logger.warning("Fast backend shutdown requested; skipping camera SDK teardown.")
+        self._stop_event.set()
+        self._preview_stop_event.set()
+        try:
+            self.daq.close()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("DAQ cleanup during fast shutdown failed: %s", exc)
+
     def _ensure_preview_worker_locked(self) -> None:
         if self._preview_worker is not None and self._preview_worker.is_alive():
             return
