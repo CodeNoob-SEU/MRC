@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 import json
 import os
@@ -49,7 +49,9 @@ class AppConfig:
     video_trim_enabled: bool = True
     video_trim_mode: str = "reencode"
     ffmpeg_path: str = ""
+    camera2_enabled: bool = False
     camera: CameraConfig = field(default_factory=CameraConfig)
+    camera2: CameraConfig = field(default_factory=CameraConfig)
     daq: DaqConfig = field(default_factory=DaqConfig)
 
     @classmethod
@@ -71,31 +73,26 @@ class AppConfig:
         vendor_arch = os.getenv("MRC_VENDOR_ARCH", "").lower()
         if vendor_arch in {"win32", "x86", "32"}:
             config.camera.dxmedia_dll = "vendor/camera/win32/DXMediaCap.dll"
+            config.camera2.dxmedia_dll = "vendor/camera/win32/DXMediaCap.dll"
             config.daq.usb3000_dll = "vendor/daq/x86/USB3000.dll"
         elif vendor_arch in {"x64", "amd64", "64"}:
             config.camera.dxmedia_dll = "vendor/camera/x64/DXMediaCap.dll"
+            config.camera2.dxmedia_dll = "vendor/camera/x64/DXMediaCap.dll"
             config.daq.usb3000_dll = "vendor/daq/x64/USB3000.dll"
-        config.camera.device_index = int(os.getenv("MRC_CAMERA_DEVICE_INDEX", str(config.camera.device_index)))
-        config.camera.width = int(os.getenv("MRC_CAMERA_WIDTH", str(config.camera.width)))
-        config.camera.height = int(os.getenv("MRC_CAMERA_HEIGHT", str(config.camera.height)))
-        config.camera.fps = float(os.getenv("MRC_CAMERA_FPS", str(config.camera.fps)))
-        config.camera.video_standard = int(os.getenv("MRC_CAMERA_VIDEO_STANDARD", str(config.camera.video_standard)))
-        config.camera.colorspace = int(os.getenv("MRC_CAMERA_COLORSPACE", str(config.camera.colorspace)))
-        config.camera.capture_format = int(os.getenv("MRC_CAMERA_CAPTURE_FORMAT", str(config.camera.capture_format)))
-        config.camera.video_codec = os.getenv("MRC_CAMERA_VIDEO_CODEC", config.camera.video_codec)
-        config.camera.video_source_index = int(
-            os.getenv("MRC_CAMERA_VIDEO_SOURCE_INDEX", str(config.camera.video_source_index))
+        config.camera = _camera_from_env(config.camera, "MRC_CAMERA")
+        config.camera2 = replace(config.camera)
+        config.camera2.device_index = int(
+            os.getenv("MRC_CAMERA2_DEVICE_INDEX", str(config.camera.device_index + 1))
         )
-        config.camera.preview_mode = int(os.getenv("MRC_CAMERA_PREVIEW_MODE", str(config.camera.preview_mode)))
-        config.camera.preview_fps = float(os.getenv("MRC_CAMERA_PREVIEW_FPS", str(config.camera.preview_fps)))
-        config.camera.save_audio = os.getenv("MRC_CAMERA_SAVE_AUDIO", str(config.camera.save_audio)).lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        config.camera2.save_audio = False
+        config.camera2 = _camera_from_env(config.camera2, "MRC_CAMERA2")
+        config.camera2_enabled = _env_bool("MRC_CAMERA2_ENABLED", config.camera2_enabled)
         config.daq.device_index = int(os.getenv("MRC_DAQ_DEVICE_INDEX", str(config.daq.device_index)))
         config.camera.dxmedia_dll = os.getenv("MRC_DXMEDIA_DLL", config.camera.dxmedia_dll)
+        config.camera2.dxmedia_dll = os.getenv(
+            "MRC_CAMERA2_DXMEDIA_DLL",
+            os.getenv("MRC_DXMEDIA_DLL", config.camera2.dxmedia_dll),
+        )
         config.daq.usb3000_dll = os.getenv("MRC_USB3000_DLL", config.daq.usb3000_dll)
         return config
 
@@ -111,3 +108,24 @@ def resolve_path(path_text: str, base_dir: Path) -> Path:
     if path.is_absolute():
         return path
     return (base_dir / path).resolve()
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).lower() in {"1", "true", "yes", "on"}
+
+
+def _camera_from_env(camera: CameraConfig, prefix: str) -> CameraConfig:
+    camera.device_index = int(os.getenv(f"{prefix}_DEVICE_INDEX", str(camera.device_index)))
+    camera.width = int(os.getenv(f"{prefix}_WIDTH", str(camera.width)))
+    camera.height = int(os.getenv(f"{prefix}_HEIGHT", str(camera.height)))
+    camera.fps = float(os.getenv(f"{prefix}_FPS", str(camera.fps)))
+    camera.video_standard = int(os.getenv(f"{prefix}_VIDEO_STANDARD", str(camera.video_standard)))
+    camera.colorspace = int(os.getenv(f"{prefix}_COLORSPACE", str(camera.colorspace)))
+    camera.capture_format = int(os.getenv(f"{prefix}_CAPTURE_FORMAT", str(camera.capture_format)))
+    camera.video_codec = os.getenv(f"{prefix}_VIDEO_CODEC", camera.video_codec)
+    camera.video_source_index = int(os.getenv(f"{prefix}_VIDEO_SOURCE_INDEX", str(camera.video_source_index)))
+    camera.preview_mode = int(os.getenv(f"{prefix}_PREVIEW_MODE", str(camera.preview_mode)))
+    camera.preview_fps = float(os.getenv(f"{prefix}_PREVIEW_FPS", str(camera.preview_fps)))
+    camera.save_audio = _env_bool(f"{prefix}_SAVE_AUDIO", camera.save_audio)
+    camera.dxmedia_dll = os.getenv(f"{prefix}_DXMEDIA_DLL", camera.dxmedia_dll)
+    return camera

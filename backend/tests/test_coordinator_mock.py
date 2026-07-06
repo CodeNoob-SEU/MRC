@@ -124,6 +124,41 @@ class CoordinatorMockTest(unittest.TestCase):
         )
         self.assertEqual(alignment["expected_total_frames"], 10800)
 
+    def test_dual_camera_mock_writes_second_camera_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = AppConfig()
+            config.hardware_mode = "mock"
+            config.camera2_enabled = True
+            config.output_root = temp_dir
+            config.video_trim_enabled = False
+            config.window_minutes = 0.001
+            config.camera.fps = 30
+            config.camera2.fps = 30
+            config.daq.mock_trigger_interval_seconds = 0.02
+            config.daq.batch_points = 50
+            coordinator = ExperimentCoordinator(config, Path.cwd(), EventBus())
+            coordinator.initialize()
+            status = coordinator.start_experiment()
+
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                status = coordinator.status()
+                if status.state == "finished":
+                    break
+                time.sleep(0.02)
+
+            self.assertEqual(status.state, "finished")
+            self.assertIsNotNone(status.camera2)
+            self.assertIsNotNone(status.video_file2)
+            output_dir = Path(status.output_dir or "")
+            self.assertTrue((output_dir / "mrc_recording_camera2.mp4").exists())
+            alignment = json.loads((output_dir / "alignment.json").read_text(encoding="utf-8"))
+            self.assertIn("camera2", alignment["cameras"])
+            self.assertEqual(alignment["cameras"]["camera2"]["expected_total_frames"], alignment["expected_total_frames"])
+            self.assertEqual(alignment["camera2_video_trim"]["status"], "disabled")
+            self.assertEqual(alignment["files"]["source_video_camera2"], "mrc_recording_camera2.mp4")
+            coordinator.close()
+
     def test_manual_recording_only_controls_camera(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = AppConfig()

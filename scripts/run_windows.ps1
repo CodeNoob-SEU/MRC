@@ -3,8 +3,11 @@ param(
   [string]$Mode = "real",
   [int]$Port = 7876,
   [int]$CameraDeviceIndex = 0,
+  [switch]$EnableCamera2,
+  [int]$Camera2DeviceIndex = 1,
   [int]$DaqDeviceIndex = 0,
   [int]$VideoSourceIndex = 0,
+  [int]$VideoSourceIndex2 = 0,
   [ValidateSet("mp4", "avi")]
   [string]$CaptureFormat = "mp4"
 )
@@ -35,8 +38,11 @@ $env:MRC_PYTHON = (Resolve-Path $pythonExe).Path
 if ($Mode -eq "real") {
   $env:MRC_VENDOR_ARCH = "win32"
   $env:MRC_CAMERA_DEVICE_INDEX = [string]$CameraDeviceIndex
+  $env:MRC_CAMERA2_ENABLED = if ($EnableCamera2) { "1" } else { "0" }
+  $env:MRC_CAMERA2_DEVICE_INDEX = [string]$Camera2DeviceIndex
   $env:MRC_DAQ_DEVICE_INDEX = [string]$DaqDeviceIndex
   $env:MRC_CAMERA_VIDEO_SOURCE_INDEX = [string]$VideoSourceIndex
+  $env:MRC_CAMERA2_VIDEO_SOURCE_INDEX = [string]$VideoSourceIndex2
   $env:MRC_CAMERA_WIDTH = if ($env:MRC_CAMERA_WIDTH) { $env:MRC_CAMERA_WIDTH } else { "720" }
   $env:MRC_CAMERA_HEIGHT = if ($env:MRC_CAMERA_HEIGHT) { $env:MRC_CAMERA_HEIGHT } else { "480" }
   $env:MRC_CAMERA_FPS = if ($env:MRC_CAMERA_FPS) { $env:MRC_CAMERA_FPS } else { "30" }
@@ -46,6 +52,7 @@ if ($Mode -eq "real") {
   $env:MRC_CAMERA_VIDEO_CODEC = if ($env:MRC_CAMERA_VIDEO_CODEC) { $env:MRC_CAMERA_VIDEO_CODEC } else { "x264 Codec" }
   $env:MRC_CAMERA_PREVIEW_MODE = if ($env:MRC_CAMERA_PREVIEW_MODE) { $env:MRC_CAMERA_PREVIEW_MODE } else { "2" }
   $env:MRC_CAMERA_PREVIEW_FPS = if ($env:MRC_CAMERA_PREVIEW_FPS) { $env:MRC_CAMERA_PREVIEW_FPS } else { "0" }
+  $env:MRC_CAMERA2_SAVE_AUDIO = if ($env:MRC_CAMERA2_SAVE_AUDIO) { $env:MRC_CAMERA2_SAVE_AUDIO } else { "0" }
 }
 
 if (!$env:MRC_FFMPEG -and (Test-Path $ffmpegExe)) {
@@ -59,8 +66,15 @@ Write-Host "  Python:           $env:MRC_PYTHON"
 if ($Mode -eq "real") {
   Write-Host "  Vendor arch:      $env:MRC_VENDOR_ARCH"
   Write-Host "  Camera index:     $env:MRC_CAMERA_DEVICE_INDEX"
+  Write-Host "  Camera 2 enabled: $env:MRC_CAMERA2_ENABLED"
+  if ($EnableCamera2) {
+    Write-Host "  Camera 2 index:   $env:MRC_CAMERA2_DEVICE_INDEX"
+  }
   Write-Host "  DAQ index:        $env:MRC_DAQ_DEVICE_INDEX"
   Write-Host "  Video source:     $env:MRC_CAMERA_VIDEO_SOURCE_INDEX"
+  if ($EnableCamera2) {
+    Write-Host "  Video source 2:   $env:MRC_CAMERA2_VIDEO_SOURCE_INDEX"
+  }
   Write-Host "  Camera format:    $env:MRC_CAMERA_WIDTH x $env:MRC_CAMERA_HEIGHT @ $env:MRC_CAMERA_FPS fps"
 }
 if ($env:MRC_FFMPEG) {

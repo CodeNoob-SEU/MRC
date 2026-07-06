@@ -25,7 +25,9 @@ type AppStatus = {
   session_id: string | null;
   output_dir: string | null;
   video_file: string | null;
+  video_file2: string | null;
   aligned_video_file: string | null;
+  aligned_video_file2: string | null;
   video_trim_status: string | null;
   trigger_count: number;
   started_at: string | null;
@@ -34,6 +36,7 @@ type AppStatus = {
   window_remaining_seconds: number | null;
   last_error: string | null;
   camera: HardwareStatus | null;
+  camera2: HardwareStatus | null;
   daq: HardwareStatus | null;
   sync_timebase: string;
   t0_locked: boolean;
@@ -77,7 +80,10 @@ const triggers = ref<TriggerRow[]>([]);
 const waveform = ref<number[]>([]);
 const previewFrames = ref<[string, string]>(["", ""]);
 const activePreviewIndex = ref(0);
+const previewFrames2 = ref<[string, string]>(["", ""]);
+const activePreviewIndex2 = ref(0);
 const previewError = ref("");
+const previewError2 = ref("");
 const connection = ref("connecting");
 const busy = ref(false);
 const outputRoot = ref("runs");
@@ -88,7 +94,9 @@ const errorMessage = ref("");
 const recordingMode = ref<"trigger" | "manual">("trigger");
 let socket: WebSocket | null = null;
 let pendingPreviewSrc = "";
+let pendingPreviewSrc2 = "";
 let previewDecodeBusy = false;
+let previewDecodeBusy2 = false;
 
 const canStart = computed(() => {
   const state = status.value?.state ?? "idle";
@@ -139,8 +147,10 @@ const remainingWindowLabel = computed(() => {
 
 const outputPath = computed(() => status.value?.output_dir ?? "-");
 const cameraOnline = computed(() => Boolean(status.value?.camera?.initialized));
+const camera2Online = computed(() => Boolean(status.value?.camera2?.initialized));
 const daqOnline = computed(() => Boolean(status.value?.daq?.initialized));
 const hasPreviewFrame = computed(() => previewFrames.value.some(Boolean));
+const hasPreviewFrame2 = computed(() => previewFrames2.value.some(Boolean));
 const effectiveCameraFps = computed(() => status.value?.camera?.fps || cameraFps.value);
 const trimStatusLabel = computed(() => {
   if (status.value?.aligned_video_file) {
@@ -250,6 +260,14 @@ async function queuePreviewFrame(src: string) {
   await decodeLatestPreviewFrame();
 }
 
+async function queuePreviewFrame2(src: string) {
+  pendingPreviewSrc2 = src;
+  if (previewDecodeBusy2) {
+    return;
+  }
+  await decodeLatestPreviewFrame2();
+}
+
 async function decodeLatestPreviewFrame() {
   while (pendingPreviewSrc) {
     const src = pendingPreviewSrc;
@@ -275,6 +293,35 @@ async function decodeLatestPreviewFrame() {
       previewError.value = String(error);
     } finally {
       previewDecodeBusy = false;
+    }
+  }
+}
+
+async function decodeLatestPreviewFrame2() {
+  while (pendingPreviewSrc2) {
+    const src = pendingPreviewSrc2;
+    pendingPreviewSrc2 = "";
+    previewDecodeBusy2 = true;
+    try {
+      const image = new Image();
+      image.decoding = "async";
+      image.src = src;
+      if (image.decode) {
+        await image.decode();
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          image.onload = () => resolve();
+          image.onerror = () => reject(new Error("preview image decode failed"));
+        });
+      }
+      const nextIndex = activePreviewIndex2.value === 0 ? 1 : 0;
+      previewFrames2.value[nextIndex] = src;
+      activePreviewIndex2.value = nextIndex;
+      previewError2.value = "";
+    } catch (error) {
+      previewError2.value = String(error);
+    } finally {
+      previewDecodeBusy2 = false;
     }
   }
 }
@@ -305,10 +352,18 @@ function connectSocket() {
       waveform.value = payload.points.slice(-120);
     }
     if (event.type === "preview") {
-      queuePreviewFrame(event.payload.src);
+      if (event.payload.camera_id === 2) {
+        queuePreviewFrame2(event.payload.src);
+      } else {
+        queuePreviewFrame(event.payload.src);
+      }
     }
     if (event.type === "preview_error") {
-      previewError.value = event.payload.message;
+      if (event.payload.camera_id === 2) {
+        previewError2.value = event.payload.message;
+      } else {
+        previewError.value = event.payload.message;
+      }
     }
     if (event.type === "error") {
       errorMessage.value = event.payload.message;
@@ -375,14 +430,26 @@ onUnmounted(() => {
       <section class="lab-panel video-panel">
         <div class="panel-title">
           <span class="title-label">
-            <i class="status-dot offline" aria-hidden="true"></i>
+            <i class="status-dot" :class="camera2Online ? 'online' : 'offline'" aria-hidden="true"></i>
             原始视频2号
           </span>
-          <small>standby</small>
+          <small>{{ status?.camera2?.recording ? "REC" : status?.camera2?.initialized ? "LIVE" : "disabled" }}</small>
         </div>
-        <div class="video-stage video-placeholder">
-          <strong>原始视频2号</strong>
-          <span>待加入</span>
+        <div class="video-stage" :class="{ 'video-placeholder': !status?.camera2 }">
+          <img
+            v-for="(frame, index) in previewFrames2"
+            v-show="frame"
+            :key="index"
+            :src="frame"
+            alt="Camera 2 preview"
+            class="preview-image"
+            :class="{ active: index === activePreviewIndex2 }"
+            decoding="async"
+          />
+          <div v-if="!hasPreviewFrame2" class="video-empty">
+            {{ status?.camera2 ? "等待二号相机初始化" : "二号相机未启用" }}
+          </div>
+          <span v-if="previewError2" class="preview-error">{{ previewError2 }}</span>
         </div>
       </section>
 
@@ -535,9 +602,15 @@ onUnmounted(() => {
             <div class="status-grid">
               <div class="status-card">
                 <Video :size="18" />
-                <span>Camera</span>
+                <span>Camera 1</span>
                 <strong>{{ status?.camera?.mode ?? "-" }} · {{ status?.camera?.recording ? "recording" : "idle" }}</strong>
                 <small>{{ status?.camera?.device_name ?? "No device name" }}</small>
+              </div>
+              <div class="status-card">
+                <Video :size="18" />
+                <span>Camera 2</span>
+                <strong>{{ status?.camera2?.mode ?? "-" }} · {{ status?.camera2?.recording ? "recording" : "idle" }}</strong>
+                <small>{{ status?.camera2?.device_name ?? "未启用" }}</small>
               </div>
               <div class="status-card">
                 <Usb :size="18" />

@@ -47,7 +47,7 @@ class EventBus:
     def _enqueue_latest(self, queue: asyncio.Queue[Dict[str, Any]], event: Dict[str, Any]) -> None:
         event_type = str(event.get("type", ""))
         if event_type in self._coalesced_types:
-            self._drop_queued_type(queue, event_type)
+            self._drop_queued_matching(queue, event)
 
         while True:
             try:
@@ -60,7 +60,11 @@ class EventBus:
                     return
 
     @staticmethod
-    def _drop_queued_type(queue: asyncio.Queue[Dict[str, Any]], event_type: str) -> None:
+    def _drop_queued_matching(queue: asyncio.Queue[Dict[str, Any]], event: Dict[str, Any]) -> None:
+        event_type = str(event.get("type", ""))
+        event_camera_id = None
+        if event_type == "preview":
+            event_camera_id = event.get("payload", {}).get("camera_id", 1)
         kept: Deque[Dict[str, Any]] = deque()
         while True:
             try:
@@ -68,6 +72,9 @@ class EventBus:
             except asyncio.QueueEmpty:
                 break
             if queued.get("type") != event_type:
+                kept.append(queued)
+                continue
+            if event_camera_id is not None and queued.get("payload", {}).get("camera_id", 1) != event_camera_id:
                 kept.append(queued)
 
         while kept:

@@ -29,7 +29,9 @@ class ExperimentStatus:
     session_id: Optional[str] = None
     output_dir: Optional[str] = None
     video_file: Optional[str] = None
+    video_file2: Optional[str] = None
     aligned_video_file: Optional[str] = None
+    aligned_video_file2: Optional[str] = None
     video_trim_status: Optional[str] = None
     trigger_count: int = 0
     started_at: Optional[str] = None
@@ -38,6 +40,7 @@ class ExperimentStatus:
     window_remaining_seconds: Optional[float] = None
     last_error: Optional[str] = None
     camera: Optional[Dict[str, Any]] = None
+    camera2: Optional[Dict[str, Any]] = None
     daq: Optional[Dict[str, Any]] = None
     sync_timebase: str = "daq_sample_clock"
     t0_locked: bool = False
@@ -56,6 +59,8 @@ class SyncStartContext:
     camera_start_call_enter_monotonic_ns: int
     camera_recording_started_monotonic_ns: int
     daq_sample0_monotonic_ns: int
+    camera2_start_call_enter_monotonic_ns: Optional[int] = None
+    camera2_recording_started_monotonic_ns: Optional[int] = None
 
 
 class ExperimentCoordinator:
@@ -64,6 +69,11 @@ class ExperimentCoordinator:
         self.repo_root = repo_root
         self.event_bus = event_bus
         self.camera: BaseCamera = build_camera(config.hardware_mode, config.camera, repo_root)
+        self.camera2: Optional[BaseCamera] = (
+            build_camera(config.hardware_mode, config.camera2, repo_root)
+            if config.camera2_enabled
+            else None
+        )
         self.daq: BaseDaq = build_daq(config.hardware_mode, config.daq, repo_root)
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
@@ -72,6 +82,7 @@ class ExperimentCoordinator:
         self._preview_worker: Optional[threading.Thread] = None
         self._status = ExperimentStatus(
             camera=asdict(self.camera.status()),
+            camera2=asdict(self.camera2.status()) if self.camera2 else None,
             daq=asdict(self.daq.status()),
         )
         self._logger = logging.getLogger("mrc_backend.experiment")
@@ -79,8 +90,10 @@ class ExperimentCoordinator:
     def initialize(self) -> ExperimentStatus:
         with self._lock:
             camera_status = self.camera.initialize()
+            camera2_status = self.camera2.initialize() if self.camera2 else None
             daq_status = self.daq.initialize()
             self._status.camera = asdict(camera_status)
+            self._status.camera2 = asdict(camera2_status) if camera2_status else None
             self._status.daq = asdict(daq_status)
             self._status.last_error = None
             self._ensure_preview_worker_locked()
@@ -92,6 +105,8 @@ class ExperimentCoordinator:
             return {
                 "hardware_mode": self.config.hardware_mode,
                 "camera": asdict(self.camera.status()),
+                "camera2_enabled": self.camera2 is not None,
+                "camera2": asdict(self.camera2.status()) if self.camera2 else None,
                 "daq": asdict(self.daq.status()),
             }
 
@@ -104,8 +119,17 @@ class ExperimentCoordinator:
                 "devices": [],
                 "error": None,
             },
+            "camera2_enabled": self.camera2 is not None,
+            "camera2": None,
             "daq": {"ok": False, "status": asdict(self.daq.status()), "error": None},
         }
+        if self.camera2 is not None:
+            result["camera2"] = {
+                "ok": False,
+                "status": asdict(self.camera2.status()),
+                "devices": [],
+                "error": None,
+            }
         try:
             enumerate_devices = getattr(self.camera, "enumerate_devices")
             result["camera"]["devices"] = enumerate_devices()
@@ -118,6 +142,20 @@ class ExperimentCoordinator:
         except Exception as exc:  # noqa: BLE001
             result["camera"]["status"] = asdict(self.camera.status())
             result["camera"]["error"] = str(exc)
+
+        if self.camera2 is not None:
+            try:
+                enumerate_devices2 = getattr(self.camera2, "enumerate_devices")
+                result["camera2"]["devices"] = enumerate_devices2()
+            except Exception as exc:  # noqa: BLE001
+                result["camera2"]["devices_error"] = str(exc)
+
+            try:
+                result["camera2"]["status"] = asdict(self.camera2.initialize())
+                result["camera2"]["ok"] = True
+            except Exception as exc:  # noqa: BLE001
+                result["camera2"]["status"] = asdict(self.camera2.status())
+                result["camera2"]["error"] = str(exc)
 
         try:
             result["daq"]["status"] = asdict(self.daq.initialize())
@@ -155,17 +193,36 @@ class ExperimentCoordinator:
             (output_dir / "events.jsonl").write_text("", encoding="utf-8")
             video_suffix = ".avi" if self.config.camera.capture_format == 1 else ".mp4"
             video_file = output_dir / f"mrc_recording{video_suffix}"
+            video_suffix2 = ".avi" if self.config.camera2.capture_format == 1 else ".mp4"
+            video_file2 = output_dir / f"mrc_recording_camera2{video_suffix2}"
 
             camera_start_call_enter_monotonic_ns = time.monotonic_ns()
-            camera_status = self.camera.start_recording(video_file)
-            active_video_file = Path(camera_status.active_file or str(video_file))
-            camera_recording_started_monotonic_ns = time.monotonic_ns()
+            camera_status: CameraStatus
+            camera2_status: Optional[CameraStatus] = None
+            active_video_file: Path
+            active_video_file2: Optional[Path] = None
+            camera2_start_call_enter_monotonic_ns: Optional[int] = None
+            camera2_recording_started_monotonic_ns: Optional[int] = None
+            try:
+                camera_status = self.camera.start_recording(video_file)
+                active_video_file = Path(camera_status.active_file or str(video_file))
+                camera_recording_started_monotonic_ns = time.monotonic_ns()
+                if self.camera2 is not None:
+                    camera2_start_call_enter_monotonic_ns = time.monotonic_ns()
+                    camera2_status = self.camera2.start_recording(video_file2)
+                    active_video_file2 = Path(camera2_status.active_file or str(video_file2))
+                    camera2_recording_started_monotonic_ns = time.monotonic_ns()
+            except Exception:
+                self._stop_all_cameras()
+                raise
             daq_status = self.daq.start_sampling()
             daq_sample0_monotonic_ns = daq_status.sample0_monotonic_ns or time.monotonic_ns()
             sync_context = SyncStartContext(
                 camera_start_call_enter_monotonic_ns=camera_start_call_enter_monotonic_ns,
                 camera_recording_started_monotonic_ns=camera_recording_started_monotonic_ns,
                 daq_sample0_monotonic_ns=daq_sample0_monotonic_ns,
+                camera2_start_call_enter_monotonic_ns=camera2_start_call_enter_monotonic_ns,
+                camera2_recording_started_monotonic_ns=camera2_recording_started_monotonic_ns,
             )
             self._stop_event.clear()
             self._status = ExperimentStatus(
@@ -174,9 +231,11 @@ class ExperimentCoordinator:
                 session_id=session_id,
                 output_dir=str(output_dir),
                 video_file=str(active_video_file),
+                video_file2=str(active_video_file2) if active_video_file2 else None,
                 trigger_count=0,
                 started_at=datetime.now().isoformat(timespec="milliseconds"),
                 camera=asdict(camera_status),
+                camera2=asdict(camera2_status) if camera2_status else None,
                 daq=asdict(self.daq.status()),
                 alignment_file=str(output_dir / "alignment.json"),
                 frame_map_file=str(output_dir / "frame_map.csv"),
@@ -212,17 +271,30 @@ class ExperimentCoordinator:
             events_path.write_text("", encoding="utf-8")
             video_suffix = ".avi" if self.config.camera.capture_format == 1 else ".mp4"
             video_file = output_dir / f"manual_recording{video_suffix}"
+            video_suffix2 = ".avi" if self.config.camera2.capture_format == 1 else ".mp4"
+            video_file2 = output_dir / f"manual_recording_camera2{video_suffix2}"
 
-            camera_status = self.camera.start_recording(video_file)
-            active_video_file = Path(camera_status.active_file or str(video_file))
+            camera2_status: Optional[CameraStatus] = None
+            active_video_file2: Optional[Path] = None
+            try:
+                camera_status = self.camera.start_recording(video_file)
+                active_video_file = Path(camera_status.active_file or str(video_file))
+                if self.camera2 is not None:
+                    camera2_status = self.camera2.start_recording(video_file2)
+                    active_video_file2 = Path(camera2_status.active_file or str(video_file2))
+            except Exception:
+                self._stop_all_cameras()
+                raise
             self._status = ExperimentStatus(
                 state="manual_recording",
                 recording_mode="manual",
                 session_id=session_id,
                 output_dir=str(output_dir),
                 video_file=str(active_video_file),
+                video_file2=str(active_video_file2) if active_video_file2 else None,
                 started_at=datetime.now().isoformat(timespec="milliseconds"),
                 camera=asdict(camera_status),
+                camera2=asdict(camera2_status) if camera2_status else None,
                 daq=asdict(self.daq.status()),
             )
             self._append_jsonl(
@@ -231,6 +303,7 @@ class ExperimentCoordinator:
                     "type": "manual_recording_started",
                     "payload": {
                         "video_file": str(active_video_file),
+                        "video_file2": str(active_video_file2) if active_video_file2 else None,
                         "started_at": self._status.started_at,
                     },
                 },
@@ -249,9 +322,10 @@ class ExperimentCoordinator:
             if self._status.state in {"armed", "recording"}:
                 self._set_finished_locked("stopped")
             elif self._status.state == "manual_recording":
-                self.camera.stop_recording()
+                self._stop_all_cameras()
                 self._status.state = "manual_stopped"
                 self._status.camera = asdict(self.camera.status())
+                self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
                 self._status.daq = asdict(self.daq.status())
         self.event_bus.publish("status", self.status_dict())
         return self.status()
@@ -270,6 +344,8 @@ class ExperimentCoordinator:
             self._preview_worker.join(timeout=2.0)
         self.daq.close()
         self.camera.close()
+        if self.camera2 is not None:
+            self.camera2.close()
 
     def close_with_deadline(self, timeout_seconds: float = 4.0) -> None:
         done = threading.Event()
@@ -308,32 +384,35 @@ class ExperimentCoordinator:
         self._preview_worker.start()
 
     def _preview_loop(self) -> None:
-        last_error_message = ""
-        last_error_at = 0.0
+        last_error_message: Dict[int, str] = {}
+        last_error_at: Dict[int, float] = {}
         while not self._preview_stop_event.is_set():
             preview_fps = self._effective_preview_fps()
             interval_seconds = 1.0 / preview_fps
             started_at = time.monotonic()
-            try:
-                frame = self.camera.preview_frame_data_url()
-                if frame:
-                    self.event_bus.publish(
-                        "preview",
-                        {
-                            "src": frame,
-                            "mode": self.camera.status().mode,
-                            "recording": self.camera.status().recording,
-                            "fps": preview_fps,
-                        },
-                    )
-                    last_error_message = ""
-            except Exception as exc:  # noqa: BLE001
-                message = str(exc)
-                now = time.monotonic()
-                if message != last_error_message or now - last_error_at >= 1.0:
-                    self.event_bus.publish("preview_error", {"message": message})
-                    last_error_message = message
-                    last_error_at = now
+            for camera_id, camera in self._iter_cameras():
+                try:
+                    frame = camera.preview_frame_data_url()
+                    if frame:
+                        camera_status = camera.status()
+                        self.event_bus.publish(
+                            "preview",
+                            {
+                                "camera_id": camera_id,
+                                "src": frame,
+                                "mode": camera_status.mode,
+                                "recording": camera_status.recording,
+                                "fps": preview_fps,
+                            },
+                        )
+                        last_error_message[camera_id] = ""
+                except Exception as exc:  # noqa: BLE001
+                    message = str(exc)
+                    now = time.monotonic()
+                    if message != last_error_message.get(camera_id) or now - last_error_at.get(camera_id, 0.0) >= 1.0:
+                        self.event_bus.publish("preview_error", {"camera_id": camera_id, "message": message})
+                        last_error_message[camera_id] = message
+                        last_error_at[camera_id] = now
             elapsed_seconds = time.monotonic() - started_at
             self._preview_stop_event.wait(max(0.0, interval_seconds - elapsed_seconds))
 
@@ -350,6 +429,7 @@ class ExperimentCoordinator:
             self._status.state = "error"
             self._status.last_error = message
             self._status.camera = asdict(self.camera.status())
+            self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
             self._status.daq = asdict(self.daq.status())
         self.event_bus.publish("error", {"message": message})
         self.event_bus.publish("status", self.status_dict())
@@ -358,9 +438,10 @@ class ExperimentCoordinator:
         try:
             self.daq.stop_sampling()
         finally:
-            self.camera.stop_recording()
+            self._stop_all_cameras()
         self._status.state = state
         self._status.camera = asdict(self.camera.status())
+        self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
         self._status.daq = asdict(self.daq.status())
         self._worker = None
 
@@ -368,6 +449,7 @@ class ExperimentCoordinator:
         self.daq.stop_sampling()
         self._status.state = state
         self._status.camera = asdict(self.camera.status())
+        self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
         self._status.daq = asdict(self.daq.status())
 
     def _stop_camera_after_post_window_buffer(self) -> None:
@@ -375,9 +457,27 @@ class ExperimentCoordinator:
         deadline = time.monotonic() + buffer_seconds
         while time.monotonic() < deadline and not self._stop_event.is_set():
             time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
-        self.camera.stop_recording()
+        self._stop_all_cameras()
         with self._lock:
             self._status.camera = asdict(self.camera.status())
+            self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
+
+    def _iter_cameras(self) -> List[tuple[int, BaseCamera]]:
+        cameras: List[tuple[int, BaseCamera]] = [(1, self.camera)]
+        if self.camera2 is not None:
+            cameras.append((2, self.camera2))
+        return cameras
+
+    def _stop_all_cameras(self) -> None:
+        first_error: Optional[Exception] = None
+        for _camera_id, camera in self._iter_cameras():
+            try:
+                camera.stop_recording()
+            except Exception as exc:  # noqa: BLE001
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def _acquisition_loop(self, output_dir: Path, sync_context: SyncStartContext) -> None:
         trigger_csv = output_dir / "triggers.csv"
@@ -573,7 +673,10 @@ class ExperimentCoordinator:
             self._logger.debug("%s", traceback.format_exc())
             try:
                 self.daq.stop_sampling()
-                self.camera.stop_recording()
+                try:
+                    self._stop_all_cameras()
+                except Exception as stop_exc:  # noqa: BLE001
+                    self._logger.warning("Camera stop after acquisition error failed: %s", stop_exc)
             finally:
                 self._set_error(str(exc))
 
@@ -650,6 +753,67 @@ class ExperimentCoordinator:
             alignment_path.with_name("events.jsonl"),
             {"type": "frame_extract", "payload": frame_extract},
         )
+        if self.camera2 is not None and self.status().video_file2:
+            camera2_result = self._finalize_secondary_aligned_video(alignment_path, alignment)
+            alignment["camera2_video_trim"] = camera2_result.get("video_trim")
+            alignment["camera2_video_validation"] = camera2_result.get("video_validation")
+            alignment["camera2_frame_extract"] = camera2_result.get("frame_extract")
+            self._append_jsonl(
+                alignment_path.with_name("events.jsonl"),
+                {"type": "camera2_video_finalize", "payload": camera2_result},
+            )
+
+    def _finalize_secondary_aligned_video(
+        self,
+        alignment_path: Path,
+        alignment: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        source_text = self.status().video_file2
+        camera2_alignment = alignment.get("cameras", {}).get("camera2")
+        if not source_text or not camera2_alignment:
+            return {
+                "video_trim": {
+                    "status": "skipped",
+                    "reason": "camera2 source video or alignment metadata is missing",
+                }
+            }
+        source_video = Path(source_text)
+        output_video = source_video.with_name(f"{source_video.stem}_aligned{source_video.suffix}")
+        trim_result = self._trim_video_from_t0(
+            source_video=source_video,
+            output_video=output_video,
+            start_seconds=max(0.0, float(camera2_alignment["preroll_seconds"])),
+            duration_seconds=float(alignment["window_seconds"]),
+        )
+        if trim_result.get("status") == "ok":
+            alignment["files"]["source_video_camera2"] = source_video.name
+            alignment["files"]["aligned_video_camera2"] = Path(str(trim_result["output_file"])).name
+            with self._lock:
+                self._status.aligned_video_file2 = str(trim_result["output_file"])
+
+        camera2_validation_alignment = {
+            **alignment,
+            "effective_fps": camera2_alignment["effective_fps"],
+            "expected_total_frames": camera2_alignment["expected_total_frames"],
+            "preroll_seconds": camera2_alignment["preroll_seconds"],
+        }
+        validation = self._validate_aligned_video(camera2_validation_alignment, trim_result)
+        frame_extract = self._extract_alignment_check_frames(
+            alignment_path,
+            camera2_validation_alignment,
+            trim_result,
+            source_video_override=source_video,
+            preroll_seconds_override=float(camera2_alignment["preroll_seconds"]),
+            output_prefix="camera2_aligned",
+        )
+        if frame_extract.get("status") in {"ok", "warning"}:
+            alignment["files"]["camera2_aligned_first_frame"] = Path(str(frame_extract["first_frame_file"])).name
+            alignment["files"]["camera2_aligned_last_frame"] = Path(str(frame_extract["last_frame_file"])).name
+        return {
+            "video_trim": trim_result,
+            "video_validation": validation,
+            "frame_extract": frame_extract,
+        }
 
     def _validate_aligned_video(self, alignment: Dict[str, Any], trim_result: Dict[str, Any]) -> Dict[str, Any]:
         ffprobe = self._resolve_ffprobe_executable()
@@ -843,14 +1007,17 @@ class ExperimentCoordinator:
         alignment_path: Path,
         alignment: Dict[str, Any],
         trim_result: Dict[str, Any],
+        source_video_override: Optional[Path] = None,
+        preroll_seconds_override: Optional[float] = None,
+        output_prefix: str = "aligned",
     ) -> Dict[str, Any]:
         ffmpeg = self._resolve_ffmpeg_executable()
         if not ffmpeg:
             return {"status": "skipped", "reason": "ffmpeg was not found; cannot extract check frames"}
 
         output_dir = alignment_path.parent
-        first_frame = output_dir / "aligned_first_frame.jpg"
-        last_frame = output_dir / "aligned_last_frame.jpg"
+        first_frame = output_dir / f"{output_prefix}_first_frame.jpg"
+        last_frame = output_dir / f"{output_prefix}_last_frame.jpg"
         fps = max(1.0, float(alignment["effective_fps"]))
         frame_interval_seconds = 1.0 / fps
         window_seconds = float(alignment["window_seconds"])
@@ -861,11 +1028,14 @@ class ExperimentCoordinator:
             last_seconds = max(0.0, window_seconds - frame_interval_seconds)
             timing_source = "aligned_video"
         else:
-            source_text = self.status().video_file
+            source_text = str(source_video_override) if source_video_override else self.status().video_file
             if not source_text:
                 return {"status": "skipped", "reason": "source video path is missing"}
             video_source = Path(source_text)
-            first_seconds = max(0.0, float(alignment["preroll_seconds"]))
+            first_seconds = max(
+                0.0,
+                float(preroll_seconds_override if preroll_seconds_override is not None else alignment["preroll_seconds"]),
+            )
             last_seconds = max(first_seconds, first_seconds + window_seconds - frame_interval_seconds)
             timing_source = "source_video_estimated_t0"
 
@@ -1058,6 +1228,67 @@ class ExperimentCoordinator:
             sync_context.camera_recording_started_monotonic_ns
             - sync_context.camera_start_call_enter_monotonic_ns
         ) / 1_000_000_000
+        camera1_alignment = {
+            "label": "camera1",
+            "device_index": self.config.camera.device_index,
+            "video_source_index": self.config.camera.video_source_index,
+            "effective_fps": effective_fps,
+            "expected_total_frames": expected_total_frames,
+            "camera_recording_started_monotonic_ns": sync_context.camera_recording_started_monotonic_ns,
+            "camera_start_call_enter_monotonic_ns": sync_context.camera_start_call_enter_monotonic_ns,
+            "camera_start_uncertainty_seconds": uncertainty_seconds,
+            "preroll_seconds": preroll_seconds,
+            "video_t0_frame_estimated": video_t0_frame_estimated,
+            "usable_video_frame_start": usable_video_frame_start,
+            "usable_video_frame_end": usable_video_frame_end,
+        }
+        cameras = {"camera1": camera1_alignment}
+        if (
+            self.camera2 is not None
+            and sync_context.camera2_recording_started_monotonic_ns is not None
+            and sync_context.camera2_start_call_enter_monotonic_ns is not None
+        ):
+            effective_fps2 = float(self.camera2.status().fps or self.config.camera2.fps)
+            expected_total_frames2 = int(round(window_seconds * effective_fps2))
+            preroll_seconds2 = (
+                t0_monotonic_ns - sync_context.camera2_recording_started_monotonic_ns
+            ) / 1_000_000_000
+            video_t0_frame_estimated2 = 1 + round(preroll_seconds2 * effective_fps2)
+            usable_video_frame_start2 = video_t0_frame_estimated2
+            usable_video_frame_end2 = usable_video_frame_start2 + expected_total_frames2 - 1
+            uncertainty_seconds2 = (
+                sync_context.camera2_recording_started_monotonic_ns
+                - sync_context.camera2_start_call_enter_monotonic_ns
+            ) / 1_000_000_000
+            cameras["camera2"] = {
+                "label": "camera2",
+                "device_index": self.config.camera2.device_index,
+                "video_source_index": self.config.camera2.video_source_index,
+                "effective_fps": effective_fps2,
+                "expected_total_frames": expected_total_frames2,
+                "camera_recording_started_monotonic_ns": sync_context.camera2_recording_started_monotonic_ns,
+                "camera_start_call_enter_monotonic_ns": sync_context.camera2_start_call_enter_monotonic_ns,
+                "camera_start_uncertainty_seconds": uncertainty_seconds2,
+                "preroll_seconds": preroll_seconds2,
+                "video_t0_frame_estimated": video_t0_frame_estimated2,
+                "usable_video_frame_start": usable_video_frame_start2,
+                "usable_video_frame_end": usable_video_frame_end2,
+            }
+
+        files = {
+            "alignment": "alignment.json",
+            "frame_map": "frame_map.csv",
+            "triggers": "triggers.csv",
+            "trigger_db": "triggers.sqlite3",
+            "source_video": "mrc_recording.mp4" if self.config.camera.capture_format == 2 else "mrc_recording.avi",
+        }
+        if "camera2" in cameras:
+            files["source_video_camera2"] = (
+                "mrc_recording_camera2.mp4"
+                if self.config.camera2.capture_format == 2
+                else "mrc_recording_camera2.avi"
+            )
+
         return {
             "schema_version": 1,
             "sync_mode": "preroll_first_trigger_t0",
@@ -1080,19 +1311,14 @@ class ExperimentCoordinator:
             "video_t0_frame_estimated": video_t0_frame_estimated,
             "usable_video_frame_start": usable_video_frame_start,
             "usable_video_frame_end": usable_video_frame_end,
+            "cameras": cameras,
             "stop_overshoot_samples": None,
             "stop_overshoot_seconds": None,
             "video_validation": {
                 "status": "not_checked",
                 "warning": "Video frame count validation requires an external decoder such as ffprobe.",
             },
-            "files": {
-                "alignment": "alignment.json",
-                "frame_map": "frame_map.csv",
-                "triggers": "triggers.csv",
-                "trigger_db": "triggers.sqlite3",
-                "source_video": "mrc_recording.mp4" if self.config.camera.capture_format == 2 else "mrc_recording.avi",
-            },
+            "files": files,
         }
 
     @staticmethod

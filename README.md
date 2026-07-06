@@ -32,6 +32,8 @@ Useful run options:
 
 ```powershell
 .\scripts\run_windows.ps1 -VideoSourceIndex 1
+.\scripts\run_windows.ps1 -EnableCamera2
+.\scripts\run_windows.ps1 -EnableCamera2 -Camera2DeviceIndex 1 -VideoSourceIndex2 0
 .\scripts\run_windows.ps1 -CaptureFormat avi
 .\scripts\run_windows.ps1 -Mode mock
 ```
@@ -214,6 +216,29 @@ To test AV2 in the main app:
 ```powershell
 .\scripts\run_windows.ps1 -VideoSourceIndex 1
 ```
+
+To enable a second capture card for camera 2:
+
+```powershell
+.\scripts\run_windows.ps1 -EnableCamera2 -CameraDeviceIndex 0 -Camera2DeviceIndex 1
+```
+
+If the second card needs AV2 instead of AV1:
+
+```powershell
+.\scripts\run_windows.ps1 -EnableCamera2 -VideoSourceIndex2 1
+```
+
+When camera 2 is enabled, the right-top video panel shows its live preview. Trigger recording writes:
+
+```text
+mrc_recording.mp4
+mrc_recording_camera2.mp4
+mrc_recording_aligned.mp4
+mrc_recording_camera2_aligned.mp4
+```
+
+`alignment.json` keeps the existing camera 1 fields and adds `cameras.camera2`, `camera2_video_trim`, `camera2_video_validation`, and `camera2_frame_extract`.
 
 If MP4 recording still fails on a specific machine, test AVI without changing code:
 

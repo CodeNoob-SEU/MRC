@@ -76,6 +76,7 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
     @app.get("/diagnostics/runtime")
     def runtime_diagnostics() -> Dict[str, Any]:
         dxmedia_dll = (repo_root / config.camera.dxmedia_dll).resolve()
+        dxmedia_dll2 = (repo_root / config.camera2.dxmedia_dll).resolve()
         usb3000_dll = (repo_root / config.daq.usb3000_dll).resolve()
         bundled_ffmpeg = (repo_root / "vendor" / "ffmpeg" / "windows" / "bin" / "ffmpeg.exe").resolve()
         return {
@@ -106,10 +107,24 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
             "camera_video_source_index": config.camera.video_source_index,
             "camera_preview_mode": config.camera.preview_mode,
             "camera_save_audio": config.camera.save_audio,
+            "camera2_enabled": config.camera2_enabled,
+            "camera2_device_index": config.camera2.device_index,
+            "camera2_width": config.camera2.width,
+            "camera2_height": config.camera2.height,
+            "camera2_fps": config.camera2.fps,
+            "camera2_video_standard": config.camera2.video_standard,
+            "camera2_colorspace": config.camera2.colorspace,
+            "camera2_capture_format": config.camera2.capture_format,
+            "camera2_video_codec": config.camera2.video_codec,
+            "camera2_video_source_index": config.camera2.video_source_index,
+            "camera2_preview_mode": config.camera2.preview_mode,
+            "camera2_save_audio": config.camera2.save_audio,
             "daq_device_index": config.daq.device_index,
             "vendor_arch": os.getenv("MRC_VENDOR_ARCH", "default-x64"),
             "dxmedia_dll": str(dxmedia_dll),
             "dxmedia_dll_exists": dxmedia_dll.exists(),
+            "dxmedia_dll2": str(dxmedia_dll2),
+            "dxmedia_dll2_exists": dxmedia_dll2.exists(),
             "usb3000_dll": str(usb3000_dll),
             "usb3000_dll_exists": usb3000_dll.exists(),
         }
