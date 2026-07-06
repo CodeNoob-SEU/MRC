@@ -84,7 +84,6 @@ class AppConfig:
         config.camera2.device_index = int(
             os.getenv("MRC_CAMERA2_DEVICE_INDEX", str(config.camera.device_index + 1))
         )
-        config.camera2.save_audio = False
         config.camera2 = _camera_from_env(config.camera2, "MRC_CAMERA2")
         config.camera2_enabled = _env_bool("MRC_CAMERA2_ENABLED", config.camera2_enabled)
         config.daq.device_index = int(os.getenv("MRC_DAQ_DEVICE_INDEX", str(config.daq.device_index)))

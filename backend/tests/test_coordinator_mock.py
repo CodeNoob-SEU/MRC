@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from mrc_backend.config import AppConfig
 from mrc_backend.events import EventBus
@@ -12,6 +13,43 @@ from mrc_backend.experiment import ExperimentCoordinator, SyncStartContext
 
 
 class CoordinatorMockTest(unittest.TestCase):
+    def test_camera2_config_inherits_camera1_connection_defaults(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "MRC_HARDWARE_MODE": "mock",
+                "MRC_CAMERA_DEVICE_INDEX": "3",
+                "MRC_CAMERA_WIDTH": "768",
+                "MRC_CAMERA_HEIGHT": "576",
+                "MRC_CAMERA_FPS": "25",
+                "MRC_CAMERA_VIDEO_STANDARD": "32",
+                "MRC_CAMERA_COLORSPACE": "2",
+                "MRC_CAMERA_SAVE_AUDIO": "true",
+                "MRC_CAMERA_CAPTURE_FORMAT": "1",
+                "MRC_CAMERA_VIDEO_CODEC": "x264 Codec",
+                "MRC_CAMERA_VIDEO_SOURCE_INDEX": "1",
+                "MRC_CAMERA_PREVIEW_MODE": "2",
+                "MRC_CAMERA_PREVIEW_FPS": "12",
+                "MRC_CAMERA2_ENABLED": "1",
+            },
+            clear=True,
+        ):
+            env_config = AppConfig.from_env()
+
+        self.assertTrue(env_config.camera2_enabled)
+        self.assertEqual(env_config.camera2.device_index, env_config.camera.device_index + 1)
+        self.assertEqual(env_config.camera2.fps, env_config.camera.fps)
+        self.assertEqual(env_config.camera2.width, env_config.camera.width)
+        self.assertEqual(env_config.camera2.height, env_config.camera.height)
+        self.assertEqual(env_config.camera2.video_standard, env_config.camera.video_standard)
+        self.assertEqual(env_config.camera2.colorspace, env_config.camera.colorspace)
+        self.assertEqual(env_config.camera2.save_audio, env_config.camera.save_audio)
+        self.assertEqual(env_config.camera2.capture_format, env_config.camera.capture_format)
+        self.assertEqual(env_config.camera2.video_codec, env_config.camera.video_codec)
+        self.assertEqual(env_config.camera2.video_source_index, env_config.camera.video_source_index)
+        self.assertEqual(env_config.camera2.preview_mode, env_config.camera.preview_mode)
+        self.assertEqual(env_config.camera2.preview_fps, env_config.camera.preview_fps)
+
     def test_mock_experiment_writes_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = AppConfig()

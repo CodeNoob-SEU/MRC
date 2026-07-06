@@ -223,7 +223,7 @@ To enable a second capture card for camera 2:
 .\scripts\run_windows.ps1 -EnableCamera2 -CameraDeviceIndex 0 -Camera2DeviceIndex 1
 ```
 
-If the second card needs AV2 instead of AV1:
+Camera 2 inherits camera 1's connection and capture settings by default. Only the device index changes from `0` to `1`. If the second card needs a different AV input, override it explicitly:
 
 ```powershell
 .\scripts\run_windows.ps1 -EnableCamera2 -VideoSourceIndex2 1
