@@ -49,5 +49,5 @@ if ($remaining.Count -gt 0) {
       "$processId ($($process.ProcessName))"
     }
   }
-  throw "Port $Port is still occupied after cleanup by PID(s): $($details -join ', '). Try running PowerShell as Administrator or run: taskkill /PID $($remaining -join ' /PID ') /T /F"
+  throw "Port $Port is still occupied after cleanup by PID(s): $($details -join ', '). Open PowerShell as Administrator and run: .\scripts\cleanup_windows_admin.ps1 -Port $Port"
 }

@@ -313,6 +313,14 @@ $env:MRC_SHUTDOWN_TIMEOUT_SECONDS="4"
 
 Electron also runs `taskkill /T /F` for its backend child on quit. If a stale backend is still listening before startup, `scripts\ensure_backend_port_windows.ps1` kills the listener PID before launching a new backend.
 
+If Windows reports `Access is denied` while killing the backend, the stale process was usually started from an elevated or different user session. Run the system-level cleanup script from the repository root:
+
+```powershell
+.\scripts\cleanup_windows_admin.ps1 -Port 7876
+```
+
+The script asks for Administrator privileges when needed, finds the backend listener on port `7876`, follows its child process tree, and also removes MRC-related Python/Electron/Node processes whose command line points at this repository. If the port is still occupied after this script, reboot Windows to release a process stuck inside the vendor camera driver/COM teardown.
+
 ## Backend
 
 Create the local virtual environment and install runtime dependencies:
