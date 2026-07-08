@@ -85,6 +85,9 @@ class ExperimentCoordinator:
         # Camera ids that were successfully initialized at least once; only
         # these are auto-reconnected when their preview starts failing.
         self._camera_desired: Set[int] = set()
+        # Wall-clock stop instant per camera, used to measure the real
+        # capture fps (frames written / wall recording duration).
+        self._camera_stop_monotonic_ns: Dict[int, int] = {}
         self._status = ExperimentStatus(
             camera=asdict(self.camera.status()),
             camera2=asdict(self.camera2.status()) if self.camera2 else None,
@@ -223,6 +226,7 @@ class ExperimentCoordinator:
             video_suffix2 = ".avi" if self.config.camera2.capture_format == 1 else ".mp4"
             video_file2 = output_dir / f"mrc_recording_camera2{video_suffix2}"
 
+            self._camera_stop_monotonic_ns.clear()
             camera_start_call_enter_monotonic_ns = time.monotonic_ns()
             camera_status: CameraStatus
             camera2_status: Optional[CameraStatus] = None
@@ -635,9 +639,12 @@ class ExperimentCoordinator:
 
     def _stop_all_cameras(self) -> None:
         first_error: Optional[Exception] = None
-        for _camera_id, camera in self._iter_cameras():
+        for camera_id, camera in self._iter_cameras():
             try:
+                was_recording = camera.status().recording
                 camera.stop_recording()
+                if was_recording:
+                    self._camera_stop_monotonic_ns[camera_id] = time.monotonic_ns()
             except Exception as exc:  # noqa: BLE001
                 if first_error is None:
                     first_error = exc
@@ -886,8 +893,222 @@ class ExperimentCoordinator:
             self._status.window_remaining_seconds = remaining_seconds
             self._status.t0_locked = True
 
+    def _measure_video_timing(
+        self,
+        source_video: Path,
+        recording_started_monotonic_ns: int,
+        recording_stopped_monotonic_ns: Optional[int],
+        nominal_fps: float,
+    ) -> Dict[str, Any]:
+        """Measure the real capture fps: frames written vs wall recording time.
+
+        The vendor SDK stamps the container with the nominal fps, but the real
+        delivery rate is lower (NTSC 29.97, dropped frames under load), so the
+        video timeline runs shorter than the wall clock. The returned ratio
+        converts wall seconds into video-timeline seconds.
+        """
+        result: Dict[str, Any] = {
+            "status": "unavailable",
+            "nominal_fps": nominal_fps,
+            "measured_fps": None,
+            "video_time_ratio": 1.0,
+            "wall_recording_seconds": None,
+            "video_duration_seconds": None,
+            "frame_count": None,
+        }
+        if recording_stopped_monotonic_ns is None:
+            result["reason"] = "camera stop timestamp is missing"
+            return result
+        wall_seconds = (recording_stopped_monotonic_ns - recording_started_monotonic_ns) / 1_000_000_000
+        if wall_seconds <= 0:
+            result["reason"] = "non-positive wall recording duration"
+            return result
+        result["wall_recording_seconds"] = wall_seconds
+        ffprobe = self._resolve_ffprobe_executable()
+        if not ffprobe:
+            result["reason"] = "ffprobe was not found"
+            return result
+        if not source_video.exists() or source_video.stat().st_size == 0:
+            result["reason"] = "source video does not exist or is empty"
+            return result
+        command = [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=nb_frames,duration",
+            "-of",
+            "json",
+            str(source_video),
+        ]
+        try:
+            completed = self._run_tracked(command, timeout=60)
+            stream = json.loads(completed.stdout)["streams"][0]
+            duration = float(stream.get("duration") or 0.0)
+            frame_count = int(stream.get("nb_frames") or 0)
+        except Exception as exc:  # noqa: BLE001
+            result["status"] = "failed"
+            result["reason"] = f"ffprobe timing probe failed: {exc}"
+            return result
+        if frame_count <= 0 and duration > 0:
+            frame_count = int(round(duration * nominal_fps))
+        if frame_count <= 0:
+            result["reason"] = "could not determine the source frame count"
+            return result
+        measured_fps = frame_count / wall_seconds
+        ratio = measured_fps / nominal_fps if nominal_fps > 0 else 1.0
+        if not 0.5 <= ratio <= 1.5:
+            result["status"] = "failed"
+            result["reason"] = f"implausible video/wall ratio {ratio:.4f}; keeping nominal fps"
+            return result
+        result.update(
+            status="ok",
+            measured_fps=measured_fps,
+            video_time_ratio=ratio,
+            video_duration_seconds=duration,
+            frame_count=frame_count,
+        )
+        return result
+
+    @staticmethod
+    def _apply_measured_timing_to_camera(
+        camera_alignment: Dict[str, Any],
+        timing: Dict[str, Any],
+        window_seconds: float,
+    ) -> None:
+        measured_fps = float(timing["measured_fps"])
+        preroll_wall = float(camera_alignment["preroll_seconds"])
+        expected_total_frames = int(round(window_seconds * measured_fps))
+        video_t0_frame = 1 + round(preroll_wall * measured_fps)
+        camera_alignment.update(
+            {
+                "nominal_fps": float(timing["nominal_fps"]),
+                "effective_fps": measured_fps,
+                "fps_source": "measured_frames_vs_wall_clock",
+                "video_time_ratio": float(timing["video_time_ratio"]),
+                "expected_total_frames": expected_total_frames,
+                "video_t0_frame_estimated": video_t0_frame,
+                "usable_video_frame_start": video_t0_frame,
+                "usable_video_frame_end": video_t0_frame + expected_total_frames - 1,
+            }
+        )
+
+    def _apply_measured_timing_to_alignment(
+        self,
+        alignment: Dict[str, Any],
+        timing: Dict[str, Any],
+    ) -> None:
+        window_seconds = float(alignment["window_seconds"])
+        ratio = float(timing["video_time_ratio"])
+        camera1_alignment = alignment.get("cameras", {}).get("camera1")
+        if camera1_alignment is not None:
+            self._apply_measured_timing_to_camera(camera1_alignment, timing, window_seconds)
+            mirror_source: Dict[str, Any] = camera1_alignment
+        else:
+            mirror_source = dict(alignment)
+            mirror_source["preroll_seconds"] = alignment["preroll_seconds"]
+            self._apply_measured_timing_to_camera(mirror_source, timing, window_seconds)
+        for key in (
+            "nominal_fps",
+            "effective_fps",
+            "fps_source",
+            "video_time_ratio",
+            "expected_total_frames",
+            "video_t0_frame_estimated",
+            "usable_video_frame_start",
+            "usable_video_frame_end",
+        ):
+            alignment[key] = mirror_source[key]
+        # Video-timeline equivalents of the wall-clock window/preroll; the
+        # ffmpeg trim and validation operate on the video timeline.
+        alignment["video_window_seconds"] = window_seconds * ratio
+        alignment["video_preroll_seconds"] = max(0.0, float(alignment["preroll_seconds"])) * ratio
+        alignment["confidence"] = (
+            "measured_fps (container frames vs wall clock, linear model); not hardware exposure sync"
+        )
+
+    def _rewrite_trigger_frames(self, output_dir: Path, alignment: Dict[str, Any]) -> None:
+        """Recompute trigger->frame mapping with the measured fps."""
+        db_path = output_dir / "triggers.sqlite3"
+        csv_path = output_dir / "triggers.csv"
+        if not db_path.exists():
+            return
+        effective_fps = float(alignment["effective_fps"])
+        usable_start = int(alignment["usable_video_frame_start"])
+        target_end_sample = int(alignment["target_end_sample"])
+        try:
+            with sqlite3.connect(db_path) as db:
+                rows = db.execute(
+                    "select trigger_index, absolute_time, relative_time_seconds, sample_number, "
+                    "window_remaining, sample_offset_from_t0, timebase from triggers order by trigger_index"
+                ).fetchall()
+                updates = []
+                csv_rows = []
+                for (
+                    trigger_index,
+                    absolute_time,
+                    rel_seconds,
+                    sample_number,
+                    window_remaining,
+                    sample_offset,
+                    timebase,
+                ) in rows:
+                    if int(sample_number) >= target_end_sample:
+                        frame_index_from_t0 = -1
+                        video_frame_index = -1
+                    else:
+                        frame_index_from_t0 = 1 + round(float(rel_seconds) * effective_fps)
+                        video_frame_index = usable_start + frame_index_from_t0 - 1
+                    updates.append((frame_index_from_t0, frame_index_from_t0, video_frame_index, trigger_index))
+                    csv_rows.append(
+                        {
+                            "trigger_index": trigger_index,
+                            "absolute_time": absolute_time,
+                            "relative_time_seconds": f"{float(rel_seconds):.6f}",
+                            "sample_number": sample_number,
+                            "frame_index": frame_index_from_t0,
+                            "window_remaining": f"{float(window_remaining):.3f}",
+                            "frame_mapping_mode": "measured_fps",
+                            "sample_offset_from_t0": sample_offset,
+                            "frame_index_from_t0": frame_index_from_t0,
+                            "video_frame_index_estimated": video_frame_index,
+                            "timebase": timebase,
+                        }
+                    )
+                db.executemany(
+                    "update triggers set frame_index = ?, frame_mapping_mode = 'measured_fps', "
+                    "frame_index_from_t0 = ?, video_frame_index_estimated = ? where trigger_index = ?",
+                    updates,
+                )
+                db.commit()
+            with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
+                writer = csv.DictWriter(
+                    csv_file,
+                    fieldnames=[
+                        "trigger_index",
+                        "absolute_time",
+                        "relative_time_seconds",
+                        "sample_number",
+                        "frame_index",
+                        "window_remaining",
+                        "frame_mapping_mode",
+                        "sample_offset_from_t0",
+                        "frame_index_from_t0",
+                        "video_frame_index_estimated",
+                        "timebase",
+                    ],
+                )
+                writer.writeheader()
+                for row in csv_rows:
+                    writer.writerow(row)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("Rewriting trigger frame mapping with measured fps failed: %s", exc)
+
     def _finalize_aligned_video(self, alignment_path: Path, alignment: Dict[str, Any]) -> None:
         source_text = self.status().video_file
+        video_ratio = 1.0
         if not source_text:
             trim_result = {
                 "status": "skipped",
@@ -896,12 +1117,41 @@ class ExperimentCoordinator:
         else:
             source_video = Path(source_text)
             alignment["files"]["source_video"] = source_video.name
+            timing = self._measure_video_timing(
+                source_video=source_video,
+                recording_started_monotonic_ns=int(alignment["camera_recording_started_monotonic_ns"]),
+                recording_stopped_monotonic_ns=self._camera_stop_monotonic_ns.get(1),
+                nominal_fps=float(alignment["effective_fps"]),
+            )
+            alignment["video_timing"] = timing
+            if timing["status"] == "ok":
+                video_ratio = float(timing["video_time_ratio"])
+                self._apply_measured_timing_to_alignment(alignment, timing)
+                self._write_frame_map(
+                    alignment_path.with_name("frame_map.csv"),
+                    t0_sample_number=int(alignment["t0_sample_number"]),
+                    expected_total_frames=int(alignment["expected_total_frames"]),
+                    usable_video_frame_start=int(alignment["usable_video_frame_start"]),
+                    effective_fps=float(alignment["effective_fps"]),
+                    sample_rate_hz=self.config.daq.sample_rate_hz,
+                )
+                self._rewrite_trigger_frames(alignment_path.parent, alignment)
+                with self._lock:
+                    self._status.expected_total_frames = int(alignment["expected_total_frames"])
+                    self._status.video_t0_frame_estimated = int(alignment["video_t0_frame_estimated"])
+                    self._status.usable_video_frame_start = int(alignment["usable_video_frame_start"])
+                    self._status.usable_video_frame_end = int(alignment["usable_video_frame_end"])
+            else:
+                self._logger.warning(
+                    "Video timing measurement unavailable (%s); falling back to nominal fps.",
+                    timing.get("reason"),
+                )
             output_video = source_video.with_name(f"{source_video.stem}_aligned{source_video.suffix}")
             trim_result = self._trim_video_from_t0(
                 source_video=source_video,
                 output_video=output_video,
-                start_seconds=max(0.0, float(alignment["preroll_seconds"])),
-                duration_seconds=float(alignment["window_seconds"]),
+                start_seconds=max(0.0, float(alignment["preroll_seconds"])) * video_ratio,
+                duration_seconds=float(alignment["window_seconds"]) * video_ratio,
             )
 
         alignment["video_trim"] = trim_result
@@ -918,7 +1168,12 @@ class ExperimentCoordinator:
             {"type": "video_trim", "payload": trim_result},
         )
         alignment["video_validation"] = self._validate_aligned_video(alignment, trim_result)
-        frame_extract = self._extract_alignment_check_frames(alignment_path, alignment, trim_result)
+        frame_extract = self._extract_alignment_check_frames(
+            alignment_path,
+            alignment,
+            trim_result,
+            preroll_seconds_override=max(0.0, float(alignment["preroll_seconds"])) * video_ratio,
+        )
         alignment["frame_extract"] = frame_extract
         if frame_extract.get("status") in {"ok", "warning"}:
             alignment["files"]["aligned_first_frame"] = Path(str(frame_extract["first_frame_file"])).name
@@ -952,12 +1207,29 @@ class ExperimentCoordinator:
                 }
             }
         source_video = Path(source_text)
+        window_seconds = float(alignment["window_seconds"])
+        video_ratio2 = 1.0
+        timing2 = self._measure_video_timing(
+            source_video=source_video,
+            recording_started_monotonic_ns=int(camera2_alignment["camera_recording_started_monotonic_ns"]),
+            recording_stopped_monotonic_ns=self._camera_stop_monotonic_ns.get(2),
+            nominal_fps=float(camera2_alignment["effective_fps"]),
+        )
+        camera2_alignment["video_timing"] = timing2
+        if timing2["status"] == "ok":
+            video_ratio2 = float(timing2["video_time_ratio"])
+            self._apply_measured_timing_to_camera(camera2_alignment, timing2, window_seconds)
+        else:
+            self._logger.warning(
+                "Camera2 video timing measurement unavailable (%s); falling back to nominal fps.",
+                timing2.get("reason"),
+            )
         output_video = source_video.with_name(f"{source_video.stem}_aligned{source_video.suffix}")
         trim_result = self._trim_video_from_t0(
             source_video=source_video,
             output_video=output_video,
-            start_seconds=max(0.0, float(camera2_alignment["preroll_seconds"])),
-            duration_seconds=float(alignment["window_seconds"]),
+            start_seconds=max(0.0, float(camera2_alignment["preroll_seconds"])) * video_ratio2,
+            duration_seconds=window_seconds * video_ratio2,
         )
         if trim_result.get("status") == "ok":
             alignment["files"]["source_video_camera2"] = source_video.name
@@ -970,6 +1242,8 @@ class ExperimentCoordinator:
             "effective_fps": camera2_alignment["effective_fps"],
             "expected_total_frames": camera2_alignment["expected_total_frames"],
             "preroll_seconds": camera2_alignment["preroll_seconds"],
+            "nominal_fps": float(timing2["nominal_fps"]),
+            "video_window_seconds": window_seconds * video_ratio2,
         }
         validation = self._validate_aligned_video(camera2_validation_alignment, trim_result)
         frame_extract = self._extract_alignment_check_frames(
@@ -977,7 +1251,7 @@ class ExperimentCoordinator:
             camera2_validation_alignment,
             trim_result,
             source_video_override=source_video,
-            preroll_seconds_override=float(camera2_alignment["preroll_seconds"]),
+            preroll_seconds_override=max(0.0, float(camera2_alignment["preroll_seconds"])) * video_ratio2,
             output_prefix="camera2_aligned",
         )
         if frame_extract.get("status") in {"ok", "warning"}:
@@ -1028,7 +1302,9 @@ class ExperimentCoordinator:
                 "command": command,
             }
         expected_frames = int(alignment["expected_total_frames"])
-        expected_duration = float(alignment["window_seconds"])
+        # The aligned file lives on the video timeline, which is shorter than
+        # the wall-clock window when the real capture fps is below nominal.
+        expected_duration = float(alignment.get("video_window_seconds") or alignment["window_seconds"])
         frame_delta = actual_frames - expected_frames
         duration_delta = actual_duration - expected_duration
         status = "ok" if frame_delta == 0 else "warning"
@@ -1186,9 +1462,11 @@ class ExperimentCoordinator:
         output_dir = alignment_path.parent
         first_frame = output_dir / f"{output_prefix}_first_frame.jpg"
         last_frame = output_dir / f"{output_prefix}_last_frame.jpg"
-        fps = max(1.0, float(alignment["effective_fps"]))
+        # Timestamps here address the video timeline, where frame spacing is
+        # 1/nominal fps and the window length is scaled by the measured ratio.
+        fps = max(1.0, float(alignment.get("nominal_fps") or alignment["effective_fps"]))
         frame_interval_seconds = 1.0 / fps
-        window_seconds = float(alignment["window_seconds"])
+        window_seconds = float(alignment.get("video_window_seconds") or alignment["window_seconds"])
 
         if trim_result.get("status") == "ok":
             video_source = Path(str(trim_result["output_file"]))
