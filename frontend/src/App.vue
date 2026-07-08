@@ -74,6 +74,8 @@ type WaveformPayload = {
   points: number[];
 };
 
+type PreviewRotation = 0 | 90 | 180 | 270;
+
 const backendUrl = window.mrc?.backendUrl ?? "http://127.0.0.1:7876";
 const wsUrl = backendUrl.replace("http", "ws") + "/ws";
 
@@ -91,6 +93,8 @@ const busy = ref(false);
 const outputRoot = ref("runs");
 const windowSeconds = ref(360);
 const cameraFps = ref(30);
+const cameraRotation = ref<PreviewRotation>(0);
+const cameraRotation2 = ref<PreviewRotation>(0);
 const thresholdVolts = ref(2.5);
 const errorMessage = ref("");
 const recordingMode = ref<"trigger" | "manual">("trigger");
@@ -154,8 +158,10 @@ const daqOnline = computed(() => Boolean(status.value?.daq?.initialized));
 const hasPreviewFrame = computed(() => previewFrames.value.some(Boolean));
 const hasPreviewFrame2 = computed(() => previewFrames2.value.some(Boolean));
 const effectiveCameraFps = computed(() => status.value?.camera?.fps || cameraFps.value);
-const videoStageStyle = computed(() => cameraStageStyle(status.value?.camera));
-const videoStageStyle2 = computed(() => cameraStageStyle(status.value?.camera2 ?? status.value?.camera));
+const videoStageStyle = computed(() => cameraStageStyle(status.value?.camera, cameraRotation.value));
+const videoStageStyle2 = computed(() => cameraStageStyle(status.value?.camera2 ?? status.value?.camera, cameraRotation2.value));
+const previewImageStyle = computed(() => previewRotationStyle(cameraRotation.value));
+const previewImageStyle2 = computed(() => previewRotationStyle(cameraRotation2.value));
 const trimStatusLabel = computed(() => {
   if (status.value?.aligned_video_file) {
     return "裁剪完成";
@@ -166,14 +172,21 @@ const trimStatusLabel = computed(() => {
   return status.value?.camera?.preview_status || status.value?.camera?.capture_status || "等待硬件状态";
 });
 
-function cameraStageStyle(camera: HardwareStatus | null | undefined) {
+function cameraStageStyle(camera: HardwareStatus | null | undefined, rotation: PreviewRotation) {
   const width = Number(camera?.width || 720);
   const height = Number(camera?.height || 480);
   const safeWidth = Number.isFinite(width) && width > 0 ? width : 720;
   const safeHeight = Number.isFinite(height) && height > 0 ? height : 480;
+  const quarterTurn = rotation === 90 || rotation === 270;
   return {
-    "--video-aspect-width": String(safeWidth),
-    "--video-aspect-height": String(safeHeight)
+    "--video-aspect-width": String(quarterTurn ? safeHeight : safeWidth),
+    "--video-aspect-height": String(quarterTurn ? safeWidth : safeHeight)
+  };
+}
+
+function previewRotationStyle(rotation: PreviewRotation) {
+  return {
+    "--preview-rotation": `${rotation}deg`
   };
 }
 
@@ -434,7 +447,8 @@ onUnmounted(() => {
             :src="frame"
             alt="Camera preview"
             class="preview-image"
-            :class="{ active: index === activePreviewIndex }"
+            :class="{ active: index === activePreviewIndex, 'quarter-turn': cameraRotation === 90 || cameraRotation === 270 }"
+            :style="previewImageStyle"
             decoding="async"
           />
           <div v-if="!hasPreviewFrame" class="video-empty">等待相机初始化</div>
@@ -458,7 +472,8 @@ onUnmounted(() => {
             :src="frame"
             alt="Camera 2 preview"
             class="preview-image"
-            :class="{ active: index === activePreviewIndex2 }"
+            :class="{ active: index === activePreviewIndex2, 'quarter-turn': cameraRotation2 === 90 || cameraRotation2 === 270 }"
+            :style="previewImageStyle2"
             decoding="async"
           />
           <div v-if="!hasPreviewFrame2" class="video-empty">
@@ -604,6 +619,24 @@ onUnmounted(() => {
               <label>
                 <span>相机 FPS · 当前 {{ effectiveCameraFps.toFixed(1) }}</span>
                 <input v-model.number="cameraFps" type="number" min="1" step="0.1" :disabled="!canStart" />
+              </label>
+              <label>
+                <span>视频1旋转</span>
+                <select v-model.number="cameraRotation">
+                  <option :value="0">0°</option>
+                  <option :value="90">90°</option>
+                  <option :value="180">180°</option>
+                  <option :value="270">270°</option>
+                </select>
+              </label>
+              <label>
+                <span>视频2旋转</span>
+                <select v-model.number="cameraRotation2">
+                  <option :value="0">0°</option>
+                  <option :value="90">90°</option>
+                  <option :value="180">180°</option>
+                  <option :value="270">270°</option>
+                </select>
               </label>
               <label>
                 <span>Trigger 阈值 V</span>
