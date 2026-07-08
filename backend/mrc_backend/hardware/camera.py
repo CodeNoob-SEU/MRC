@@ -115,6 +115,10 @@ class BaseCamera:
     def preview_frame_data_url(self) -> Optional[str]:
         raise NotImplementedError
 
+    def reconnect(self) -> CameraStatus:
+        self.close()
+        return self.initialize()
+
 
 class MockCamera(BaseCamera):
     def __init__(self) -> None:
@@ -228,8 +232,16 @@ class DXMediaCamera(BaseCamera):
 
     def _sdk_loop(self) -> None:
         self._sdk_thread_id = threading.get_ident()
+        sdk_queue = self._sdk_queue
         while True:
-            func, result_queue = self._sdk_queue.get()
+            try:
+                func, result_queue = sdk_queue.get(timeout=0.05)
+            except queue.Empty:
+                # The SDK thread owns the hidden preview window and STA COM
+                # objects; without a message pump the window shows up as
+                # "Not Responding" and COM calls can deadlock.
+                self._pump_windows_messages()
+                continue
             if func is None:
                 result_queue.put((True, None))
                 break
@@ -237,7 +249,19 @@ class DXMediaCamera(BaseCamera):
                 result_queue.put((True, func()))
             except Exception as exc:  # noqa: BLE001
                 result_queue.put((False, exc))
+            self._pump_windows_messages()
         self._sdk_thread_id = None
+
+    @staticmethod
+    def _pump_windows_messages() -> None:
+        if platform.system() != "Windows":
+            return
+        user32 = ctypes.windll.user32
+        msg_buffer = ctypes.create_string_buffer(64)  # larger than MSG on both x86/x64
+        pm_remove = 1
+        while user32.PeekMessageW(msg_buffer, None, 0, 0, pm_remove):
+            user32.TranslateMessage(msg_buffer)
+            user32.DispatchMessageW(msg_buffer)
 
     def _call_sdk(self, func: Callable[[], Any], timeout: Optional[float] = None) -> Any:
         if threading.get_ident() == self._sdk_thread_id:
@@ -521,9 +545,22 @@ class DXMediaCamera(BaseCamera):
         self._status.preview_started = True
         parent_result = dll.DXSetParentWnd(self._handle, ctypes.c_void_p(hwnd))
         self._status.preview_status += f"; DXSetParentWnd -> {format_sdk_code(parent_result)}"
+        # The SDK may have repositioned/shown the window; push it back off-screen.
+        self._move_preview_window_offscreen(hwnd)
 
-    @staticmethod
-    def _create_hidden_preview_window(width: int, height: int) -> Optional[int]:
+    # The vendor SDK force-shows whatever window it renders into, so "not
+    # visible at creation" is not enough: make the window borderless
+    # (WS_POPUP), input-dead (WS_DISABLED), keep it far off-screen, and hide
+    # it from the taskbar/Alt-Tab (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE).
+    _WS_POPUP = 0x80000000
+    _WS_DISABLED = 0x08000000
+    _WS_CLIPCHILDREN = 0x02000000
+    _WS_EX_TOOLWINDOW = 0x00000080
+    _WS_EX_NOACTIVATE = 0x08000000
+    _OFFSCREEN_POS = -32000
+
+    @classmethod
+    def _create_hidden_preview_window(cls, width: int, height: int) -> Optional[int]:
         if platform.system() != "Windows":
             return None
         user32 = ctypes.windll.user32
@@ -543,12 +580,12 @@ class DXMediaCamera(BaseCamera):
         ]
         user32.CreateWindowExW.restype = ctypes.c_void_p
         hwnd = user32.CreateWindowExW(
-            0,
+            cls._WS_EX_TOOLWINDOW | cls._WS_EX_NOACTIVATE,
             "STATIC",
             "MRC hidden camera preview",
-            0,
-            0,
-            0,
+            cls._WS_POPUP | cls._WS_DISABLED | cls._WS_CLIPCHILDREN,
+            cls._OFFSCREEN_POS,
+            cls._OFFSCREEN_POS,
             int(width),
             int(height),
             None,
@@ -557,6 +594,33 @@ class DXMediaCamera(BaseCamera):
             None,
         )
         return int(hwnd) if hwnd else None
+
+    @classmethod
+    def _move_preview_window_offscreen(cls, hwnd: Optional[int]) -> None:
+        if not hwnd or platform.system() != "Windows":
+            return
+        user32 = ctypes.windll.user32
+        user32.SetWindowPos.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+        ]
+        swp_nosize = 0x0001
+        swp_nozorder = 0x0004
+        swp_noactivate = 0x0010
+        user32.SetWindowPos(
+            ctypes.c_void_p(hwnd),
+            None,
+            cls._OFFSCREEN_POS,
+            cls._OFFSCREEN_POS,
+            0,
+            0,
+            swp_nosize | swp_nozorder | swp_noactivate,
+        )
 
     @staticmethod
     def _destroy_hidden_preview_window(hwnd: Optional[int]) -> None:
@@ -797,6 +861,43 @@ class DXMediaCamera(BaseCamera):
                 raise CameraError(f"DXStopCapture failed with code {format_sdk_code(result)}")
         self._status.recording = False
         return self.status()
+
+    def reconnect(self) -> CameraStatus:
+        try:
+            return self._call_sdk(self._reconnect_on_sdk, timeout=20.0)
+        except CameraError as exc:
+            if "timed out" not in str(exc):
+                raise
+            # The SDK thread is wedged inside a vendor call. Abandon it (it is
+            # a daemon polling its own queue) and rebuild the session on a
+            # fresh thread so the camera can come back without a restart.
+            with self._sdk_lock:
+                self._sdk_thread = None
+                self._sdk_thread_id = None
+                self._sdk_queue = queue.Queue()
+            self._handle = None
+            self._preview_started = False
+            self._preview_hwnd = None
+            self._status.preview_started = False
+            self._status.initialized = False
+            self._status.recording = False
+            return self._call_sdk(self._initialize_on_sdk, timeout=20.0)
+
+    def _reconnect_on_sdk(self) -> CameraStatus:
+        try:
+            self._close_on_sdk()
+        except Exception as exc:  # noqa: BLE001
+            # The device may already be gone; drop local handles so a fresh
+            # open can proceed anyway.
+            self._status.last_preview_error = f"camera close during reconnect failed: {exc}"
+            self._destroy_hidden_preview_window(self._preview_hwnd)
+            self._preview_hwnd = None
+            self._preview_started = False
+            self._status.preview_started = False
+            self._handle = None
+            self._status.initialized = False
+            self._status.recording = False
+        return self._initialize_on_sdk()
 
     def close(self) -> None:
         if threading.get_ident() == self._sdk_thread_id:

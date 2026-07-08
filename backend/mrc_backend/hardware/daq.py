@@ -6,6 +6,7 @@ import ctypes
 import math
 import os
 import platform
+import threading
 import time
 from typing import List, Optional
 
@@ -95,6 +96,13 @@ class BaseDaq:
     def status(self) -> DaqStatus:
         raise NotImplementedError
 
+    def reconnect(self) -> DaqStatus:
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return self.initialize()
+
 
 class MockDaq(BaseDaq):
     def __init__(self, config: DaqConfig) -> None:
@@ -169,6 +177,10 @@ class USB3000Daq(BaseDaq):
         )
         self._buffer_type = ctypes.c_float * max(config.batch_points, 160000)
         self._buffer = self._buffer_type()
+        # Serializes every DLL call: USB3CloseDevice must never run while a
+        # blocking USB3GetAi is in flight, or the vendor driver can wedge the
+        # thread in kernel mode and the process becomes unkillable.
+        self._io_lock = threading.Lock()
 
     def _load(self) -> ctypes.CDLL:
         if platform.system() != "Windows":
@@ -202,6 +214,8 @@ class USB3000Daq(BaseDaq):
         dll.SetUSB3AiConvSource.argtypes = [ctypes.c_int, ctypes.c_ubyte]
         dll.SetUSB3ClrAiFifo.argtypes = [ctypes.c_int]
         dll.SetUSB3AiSoftTrig.argtypes = [ctypes.c_int]
+        dll.SetUSB3ClrAiTrigger.argtypes = [ctypes.c_int]
+        dll.SetUSB3ClrAiTrigger.restype = ctypes.c_int
         dll.USB3GetAi.argtypes = [
             ctypes.c_int,
             ctypes.c_ulong,
@@ -218,16 +232,19 @@ class USB3000Daq(BaseDaq):
     def initialize(self) -> DaqStatus:
         dll = self._load()
         dev = self.config.device_index
-        self._check(dll.USB3OpenDevice(dev), "USB3OpenDevice")
-        for channel in range(8):
-            self._check(dll.SetUSB3AiChanSel(dev, channel, 0), "SetUSB3AiChanSel")
-        self._check(dll.SetUSB3AiChanSel(dev, self.config.trigger_channel, 1), "SetUSB3AiChanSel")
-        self._check(dll.SetUSB3AiRange(dev, self.config.trigger_channel, self.config.ai_range), "SetUSB3AiRange")
-        self._check(dll.SetUSB3AiSampleMode(dev, 0), "SetUSB3AiSampleMode")
-        self._check(dll.SetUSB3AiConnectType(dev, 1), "SetUSB3AiConnectType")
-        self._check(dll.SetUSB3AiSampleRate(dev, self.config.sample_period), "SetUSB3AiSampleRate")
-        self._check(dll.SetUSB3AiTrigSource(dev, 0), "SetUSB3AiTrigSource")
-        self._check(dll.SetUSB3AiConvSource(dev, 0), "SetUSB3AiConvSource")
+        with self._io_lock:
+            open_result = dll.USB3OpenDevice(dev)
+            if open_result != -16:  # -16 = USBDAQ_been_Opened: re-initialize is fine
+                self._check(open_result, "USB3OpenDevice")
+            for channel in range(8):
+                self._check(dll.SetUSB3AiChanSel(dev, channel, 0), "SetUSB3AiChanSel")
+            self._check(dll.SetUSB3AiChanSel(dev, self.config.trigger_channel, 1), "SetUSB3AiChanSel")
+            self._check(dll.SetUSB3AiRange(dev, self.config.trigger_channel, self.config.ai_range), "SetUSB3AiRange")
+            self._check(dll.SetUSB3AiSampleMode(dev, 0), "SetUSB3AiSampleMode")
+            self._check(dll.SetUSB3AiConnectType(dev, 1), "SetUSB3AiConnectType")
+            self._check(dll.SetUSB3AiSampleRate(dev, self.config.sample_period), "SetUSB3AiSampleRate")
+            self._check(dll.SetUSB3AiTrigSource(dev, 0), "SetUSB3AiTrigSource")
+            self._check(dll.SetUSB3AiConvSource(dev, 0), "SetUSB3AiConvSource")
         self._status.initialized = True
         return self.status()
 
@@ -236,8 +253,9 @@ class USB3000Daq(BaseDaq):
             self.initialize()
         assert self._dll is not None
         dev = self.config.device_index
-        self._check(self._dll.SetUSB3ClrAiFifo(dev), "SetUSB3ClrAiFifo")
-        self._check(self._dll.SetUSB3AiSoftTrig(dev), "SetUSB3AiSoftTrig")
+        with self._io_lock:
+            self._check(self._dll.SetUSB3ClrAiFifo(dev), "SetUSB3ClrAiFifo")
+            self._check(self._dll.SetUSB3AiSoftTrig(dev), "SetUSB3AiSoftTrig")
         self._status.sample0_monotonic_ns = time.monotonic_ns()
         self._status.sampling = True
         return self.status()
@@ -245,22 +263,34 @@ class USB3000Daq(BaseDaq):
     def read_batch(self) -> List[float]:
         if self._dll is None or not self._status.sampling:
             raise DaqError("USB3000 DAQ is not sampling.")
-        result = self._dll.USB3GetAi(
-            self.config.device_index,
-            self.config.batch_points,
-            self._buffer,
-            self.config.timeout_ms,
-        )
+        with self._io_lock:
+            if not self._status.sampling:
+                return []
+            result = self._dll.USB3GetAi(
+                self.config.device_index,
+                self.config.batch_points,
+                self._buffer,
+                self.config.timeout_ms,
+            )
+        if result == -7 and not self._status.sampling:
+            # Acquisition was stopped while this read was pending; the device
+            # stops producing samples, so a Time_Out here is expected.
+            return []
         self._check(result, "USB3GetAi")
         return [float(self._buffer[i]) for i in range(self.config.batch_points)]
 
     def stop_sampling(self) -> DaqStatus:
         self._status.sampling = False
+        if self._dll is not None and self._status.initialized:
+            with self._io_lock:
+                self._dll.SetUSB3ClrAiTrigger(self.config.device_index)
         return self.status()
 
     def close(self) -> None:
         if self._dll is not None and self._status.initialized:
-            self._dll.USB3CloseDevice(self.config.device_index)
+            self.stop_sampling()
+            with self._io_lock:
+                self._dll.USB3CloseDevice(self.config.device_index)
         self._status.initialized = False
         self._status.sampling = False
         self._status.sample0_monotonic_ns = None

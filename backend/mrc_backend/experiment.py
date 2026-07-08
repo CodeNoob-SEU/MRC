@@ -13,13 +13,13 @@ import subprocess
 import threading
 import time
 import traceback
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
 
 from .config import AppConfig
 from .events import EventBus
 from .hardware.camera import BaseCamera, CameraStatus, build_camera
-from .hardware.daq import BaseDaq, DaqStatus, TriggerDetector, build_daq
+from .hardware.daq import BaseDaq, DaqError, DaqStatus, TriggerDetector, build_daq
 
 
 @dataclass
@@ -80,6 +80,11 @@ class ExperimentCoordinator:
         self._worker: Optional[threading.Thread] = None
         self._preview_stop_event = threading.Event()
         self._preview_worker: Optional[threading.Thread] = None
+        self._subproc_lock = threading.Lock()
+        self._active_subprocs: Set[subprocess.Popen] = set()
+        # Camera ids that were successfully initialized at least once; only
+        # these are auto-reconnected when their preview starts failing.
+        self._camera_desired: Set[int] = set()
         self._status = ExperimentStatus(
             camera=asdict(self.camera.status()),
             camera2=asdict(self.camera2.status()) if self.camera2 else None,
@@ -87,10 +92,22 @@ class ExperimentCoordinator:
         )
         self._logger = logging.getLogger("mrc_backend.experiment")
 
+    _ACTIVE_STATES = {"armed", "recording", "finalizing", "manual_recording"}
+    _RECONNECT_FAILURE_THRESHOLD = 10
+    _RECONNECT_COOLDOWN_SECONDS = 10.0
+    _DAQ_RECOVERY_ATTEMPTS = 3
+    _DAQ_RECOVERY_WAIT_SECONDS = 2.0
+
     def initialize(self) -> ExperimentStatus:
         with self._lock:
+            if self._status.state in self._ACTIVE_STATES:
+                raise RuntimeError("Cannot re-initialize hardware while an experiment is running.")
             camera_status = self.camera.initialize()
-            camera2_status = self.camera2.initialize() if self.camera2 else None
+            self._camera_desired.add(1)
+            camera2_status = None
+            if self.camera2:
+                camera2_status = self.camera2.initialize()
+                self._camera_desired.add(2)
             daq_status = self.daq.initialize()
             self._status.camera = asdict(camera_status)
             self._status.camera2 = asdict(camera2_status) if camera2_status else None
@@ -111,6 +128,14 @@ class ExperimentCoordinator:
             }
 
     def diagnostics(self) -> Dict[str, Any]:
+        with self._lock:
+            if self._status.state in self._ACTIVE_STATES:
+                result = {
+                    "hardware_mode": self.config.hardware_mode,
+                    "error": "Hardware diagnostics are unavailable while an experiment is running.",
+                    "state": self._status.state,
+                }
+                return result
         result: Dict[str, Any] = {
             "hardware_mode": self.config.hardware_mode,
             "camera": {
@@ -139,6 +164,7 @@ class ExperimentCoordinator:
         try:
             result["camera"]["status"] = asdict(self.camera.initialize())
             result["camera"]["ok"] = True
+            self._camera_desired.add(1)
         except Exception as exc:  # noqa: BLE001
             result["camera"]["status"] = asdict(self.camera.status())
             result["camera"]["error"] = str(exc)
@@ -153,6 +179,7 @@ class ExperimentCoordinator:
             try:
                 result["camera2"]["status"] = asdict(self.camera2.initialize())
                 result["camera2"]["ok"] = True
+                self._camera_desired.add(2)
             except Exception as exc:  # noqa: BLE001
                 result["camera2"]["status"] = asdict(self.camera2.status())
                 result["camera2"]["error"] = str(exc)
@@ -175,7 +202,7 @@ class ExperimentCoordinator:
         threshold_volts: Optional[float] = None,
     ) -> ExperimentStatus:
         with self._lock:
-            if self._status.state in {"armed", "recording", "finalizing", "manual_recording"}:
+            if self._status.state in self._ACTIVE_STATES:
                 raise RuntimeError("Experiment is already running.")
             if camera_fps is not None:
                 self.config.camera.fps = float(camera_fps)
@@ -215,7 +242,20 @@ class ExperimentCoordinator:
             except Exception:
                 self._stop_all_cameras()
                 raise
-            daq_status = self.daq.start_sampling()
+            try:
+                daq_status = self.daq.start_sampling()
+            except Exception as first_exc:  # noqa: BLE001
+                self._logger.warning("DAQ start failed (%s); retrying once after reconnect.", first_exc)
+                try:
+                    self.daq.reconnect()
+                    daq_status = self.daq.start_sampling()
+                except Exception:
+                    # Don't leave the cameras recording with no experiment.
+                    try:
+                        self._stop_all_cameras()
+                    except Exception as stop_exc:  # noqa: BLE001
+                        self._logger.warning("Camera stop after DAQ start failure failed: %s", stop_exc)
+                    raise
             daq_sample0_monotonic_ns = daq_status.sample0_monotonic_ns or time.monotonic_ns()
             sync_context = SyncStartContext(
                 camera_start_call_enter_monotonic_ns=camera_start_call_enter_monotonic_ns,
@@ -256,7 +296,7 @@ class ExperimentCoordinator:
         camera_fps: Optional[float] = None,
     ) -> ExperimentStatus:
         with self._lock:
-            if self._status.state in {"armed", "recording", "finalizing", "manual_recording"}:
+            if self._status.state in self._ACTIVE_STATES:
                 raise RuntimeError("Experiment is already running.")
             if camera_fps is not None:
                 self.config.camera.fps = float(camera_fps)
@@ -322,7 +362,11 @@ class ExperimentCoordinator:
             if self._status.state in {"armed", "recording"}:
                 self._set_finished_locked("stopped")
             elif self._status.state == "manual_recording":
-                self._stop_all_cameras()
+                try:
+                    self._stop_all_cameras()
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.warning("Camera stop for manual recording failed: %s", exc)
+                    self._status.last_error = str(exc)
                 self._status.state = "manual_stopped"
                 self._status.camera = asdict(self.camera.status())
                 self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
@@ -342,6 +386,7 @@ class ExperimentCoordinator:
         self._preview_stop_event.set()
         if self._preview_worker is not None and self._preview_worker.is_alive():
             self._preview_worker.join(timeout=2.0)
+        self._kill_tracked_subprocesses()
         self.daq.close()
         self.camera.close()
         if self.camera2 is not None:
@@ -376,6 +421,16 @@ class ExperimentCoordinator:
         self._logger.warning("Fast backend shutdown requested; skipping camera SDK teardown.")
         self._stop_event.set()
         self._preview_stop_event.set()
+        with self._lock:
+            worker = self._worker
+        if worker is not None and worker.is_alive():
+            # Let the acquisition thread leave its current DAQ read before we
+            # close the device; closing while a read is in flight can wedge
+            # the vendor driver in kernel mode and make the process unkillable.
+            worker.join(timeout=2.0)
+        # os._exit skips normal child reaping, so make sure no ffmpeg/ffprobe
+        # is left behind holding the output files.
+        self._kill_tracked_subprocesses()
         try:
             self.daq.close()
         except Exception as exc:  # noqa: BLE001
@@ -395,14 +450,19 @@ class ExperimentCoordinator:
     def _preview_loop(self) -> None:
         last_error_message: Dict[int, str] = {}
         last_error_at: Dict[int, float] = {}
+        consecutive_failures: Dict[int, int] = {}
+        last_reconnect_at: Dict[int, float] = {}
         while not self._preview_stop_event.is_set():
             preview_fps = self._effective_preview_fps()
             interval_seconds = 1.0 / preview_fps
             started_at = time.monotonic()
+            with self._lock:
+                state_active = self._status.state in self._ACTIVE_STATES
             for camera_id, camera in self._iter_cameras():
                 try:
                     frame = camera.preview_frame_data_url()
                     if frame:
+                        consecutive_failures[camera_id] = 0
                         camera_status = camera.status()
                         self.event_bus.publish(
                             "preview",
@@ -418,12 +478,69 @@ class ExperimentCoordinator:
                 except Exception as exc:  # noqa: BLE001
                     message = str(exc)
                     now = time.monotonic()
+                    consecutive_failures[camera_id] = consecutive_failures.get(camera_id, 0) + 1
                     if message != last_error_message.get(camera_id) or now - last_error_at.get(camera_id, 0.0) >= 1.0:
                         self.event_bus.publish("preview_error", {"camera_id": camera_id, "message": message})
                         last_error_message[camera_id] = message
                         last_error_at[camera_id] = now
+                    # Reconnect only outside active recordings: restarting a
+                    # camera mid-run would invalidate the t0 alignment.
+                    if (
+                        camera_id in self._camera_desired
+                        and not state_active
+                        and consecutive_failures[camera_id] >= self._RECONNECT_FAILURE_THRESHOLD
+                        and now - last_reconnect_at.get(camera_id, -self._RECONNECT_COOLDOWN_SECONDS)
+                        >= self._RECONNECT_COOLDOWN_SECONDS
+                        and not self._preview_stop_event.is_set()
+                    ):
+                        last_reconnect_at[camera_id] = now
+                        if self._try_reconnect_camera(camera_id, camera):
+                            consecutive_failures[camera_id] = 0
             elapsed_seconds = time.monotonic() - started_at
             self._preview_stop_event.wait(max(0.0, interval_seconds - elapsed_seconds))
+
+    def _try_reconnect_camera(self, camera_id: int, camera: BaseCamera) -> bool:
+        label = f"camera{camera_id}"
+        self._logger.warning("Camera %d preview keeps failing; attempting automatic reconnect.", camera_id)
+        self.event_bus.publish("reconnect", {"device": label, "status": "attempting"})
+        try:
+            status = camera.reconnect()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("Automatic reconnect for camera %d failed: %s", camera_id, exc)
+            self.event_bus.publish("reconnect", {"device": label, "status": "failed", "message": str(exc)})
+            return False
+        with self._lock:
+            if camera_id == 1:
+                self._status.camera = asdict(status)
+            else:
+                self._status.camera2 = asdict(status)
+        self._logger.info("Camera %d reconnected.", camera_id)
+        self.event_bus.publish("reconnect", {"device": label, "status": "ok"})
+        self.event_bus.publish("status", self.status_dict())
+        return True
+
+    def _attempt_daq_recovery(self) -> None:
+        for attempt in range(1, self._DAQ_RECOVERY_ATTEMPTS + 1):
+            if self._preview_stop_event.is_set():
+                return
+            self.event_bus.publish("reconnect", {"device": "daq", "status": "attempting", "attempt": attempt})
+            try:
+                status = self.daq.reconnect()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warning("DAQ automatic reconnect attempt %d failed: %s", attempt, exc)
+                self.event_bus.publish(
+                    "reconnect",
+                    {"device": "daq", "status": "failed", "attempt": attempt, "message": str(exc)},
+                )
+                if self._preview_stop_event.wait(self._DAQ_RECOVERY_WAIT_SECONDS):
+                    return
+                continue
+            with self._lock:
+                self._status.daq = asdict(status)
+            self._logger.info("DAQ reconnected on attempt %d.", attempt)
+            self.event_bus.publish("reconnect", {"device": "daq", "status": "ok", "attempt": attempt})
+            self.event_bus.publish("status", self.status_dict())
+            return
 
     def _effective_preview_fps(self) -> float:
         configured_preview_fps = float(self.config.camera.preview_fps)
@@ -444,10 +561,19 @@ class ExperimentCoordinator:
         self.event_bus.publish("status", self.status_dict())
 
     def _set_finished_locked(self, state: str = "finished") -> None:
+        # Never let hardware teardown failures escape: an exception here would
+        # leave the state machine stuck in "recording" with no way to recover
+        # short of restarting the backend.
         try:
             self.daq.stop_sampling()
-        finally:
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("DAQ stop while finishing failed: %s", exc)
+            self._status.last_error = str(exc)
+        try:
             self._stop_all_cameras()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("Camera stop while finishing failed: %s", exc)
+            self._status.last_error = str(exc)
         self._status.state = state
         self._status.camera = asdict(self.camera.status())
         self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
@@ -470,6 +596,36 @@ class ExperimentCoordinator:
         with self._lock:
             self._status.camera = asdict(self.camera.status())
             self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
+
+    def _run_tracked(self, command: List[str], timeout: float) -> subprocess.CompletedProcess:
+        """Run an external tool while keeping a handle so shutdown can kill it."""
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with self._subproc_lock:
+            self._active_subprocs.add(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise
+        finally:
+            with self._subproc_lock:
+                self._active_subprocs.discard(proc)
+        return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+    def _kill_tracked_subprocesses(self) -> None:
+        with self._subproc_lock:
+            procs = list(self._active_subprocs)
+        for proc in procs:
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _iter_cameras(self) -> List[tuple[int, BaseCamera]]:
         cameras: List[tuple[int, BaseCamera]] = [(1, self.camera)]
@@ -681,13 +837,22 @@ class ExperimentCoordinator:
             self._logger.error("Acquisition loop failed: %s", exc)
             self._logger.debug("%s", traceback.format_exc())
             try:
-                self.daq.stop_sampling()
+                try:
+                    self.daq.stop_sampling()
+                except Exception as stop_exc:  # noqa: BLE001
+                    self._logger.warning("DAQ stop after acquisition error failed: %s", stop_exc)
                 try:
                     self._stop_all_cameras()
                 except Exception as stop_exc:  # noqa: BLE001
                     self._logger.warning("Camera stop after acquisition error failed: %s", stop_exc)
             finally:
                 self._set_error(str(exc))
+            if (
+                isinstance(exc, DaqError)
+                and not self._stop_event.is_set()
+                and not self._preview_stop_event.is_set()
+            ):
+                self._attempt_daq_recovery()
 
     def _publish_waveform(self, samples: List[float], global_sample: int) -> None:
         if not samples:
@@ -851,7 +1016,7 @@ class ExperimentCoordinator:
             str(video_file),
         ]
         try:
-            completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=120)
+            completed = self._run_tracked(command, timeout=120)
             data = json.loads(completed.stdout)
             stream = data["streams"][0]
             actual_frames = int(stream.get("nb_read_frames") or stream.get("nb_frames") or 0)
@@ -973,13 +1138,7 @@ class ExperimentCoordinator:
         errors: List[Dict[str, Any]] = []
         for label, command in commands:
             try:
-                completed = subprocess.run(
-                    command,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=900,
-                )
+                completed = self._run_tracked(command, timeout=900)
             except Exception as exc:  # noqa: BLE001
                 errors.append({"mode": label, "error": str(exc)})
                 continue
@@ -1103,8 +1262,8 @@ class ExperimentCoordinator:
             "last_frame": last_result,
         }
 
-    @staticmethod
     def _extract_video_frame(
+        self,
         *,
         ffmpeg: str,
         video_source: Path,
@@ -1125,13 +1284,7 @@ class ExperimentCoordinator:
             str(output_file),
         ]
         try:
-            completed = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
+            completed = self._run_tracked(command, timeout=120)
         except Exception as exc:  # noqa: BLE001
             return {"status": "failed", "error": str(exc), "command": command}
         if completed.returncode == 0 and output_file.exists() and output_file.stat().st_size > 0:
@@ -1148,8 +1301,8 @@ class ExperimentCoordinator:
             "command": command,
         }
 
-    @staticmethod
     def _extract_video_tail_frame(
+        self,
         *,
         ffmpeg: str,
         video_source: Path,
@@ -1171,13 +1324,7 @@ class ExperimentCoordinator:
             str(output_file),
         ]
         try:
-            completed = subprocess.run(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
+            completed = self._run_tracked(command, timeout=120)
         except Exception as exc:  # noqa: BLE001
             return {"status": "failed", "error": str(exc), "command": command}
         if completed.returncode == 0 and output_file.exists() and output_file.stat().st_size > 0:

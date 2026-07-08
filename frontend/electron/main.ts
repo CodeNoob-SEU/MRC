@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import type { OpenDialogOptions } from "electron";
 import path from "node:path";
 import fs from "node:fs";
+import http from "node:http";
 import { execFileSync, spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 
 const BACKEND_PORT = process.env.MRC_BACKEND_PORT ?? "7876";
@@ -9,6 +10,7 @@ const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 
 let mainWindow: BrowserWindow | null = null;
 let backendProcess: ChildProcessWithoutNullStreams | null = null;
+let quitInProgress = false;
 
 function clearBackendPort(): boolean {
   if (process.env.MRC_SKIP_PORT_CLEANUP === "1" || process.platform !== "win32") {
@@ -63,68 +65,96 @@ function startBackend(): void {
   backendProcess.stderr.on("data", (data) => {
     console.error(`[backend] ${data.toString().trim()}`);
   });
+  backendProcess.on("error", (error) => {
+    console.error(`[backend] failed to start: ${String(error)}`);
+    backendProcess = null;
+  });
   backendProcess.on("exit", (code, signal) => {
     console.log(`[backend] exited code=${code} signal=${signal}`);
     backendProcess = null;
   });
 }
 
-function requestFastBackendShutdown(): boolean {
+function postShutdownFast(timeoutMs: number): Promise<boolean> {
   if (process.env.MRC_FAST_BACKEND_SHUTDOWN === "0") {
-    return false;
+    return Promise.resolve(false);
   }
-  try {
-    execFileSync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        `$ProgressPreference='SilentlyContinue'; try { Invoke-WebRequest -UseBasicParsing -Method POST -Uri '${BACKEND_URL}/shutdown-fast' -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }`
-      ],
-      { windowsHide: true, stdio: "ignore", timeout: 3000 }
+  return new Promise((resolve) => {
+    const request = http.request(
+      { host: "127.0.0.1", port: Number(BACKEND_PORT), path: "/shutdown-fast", method: "POST" },
+      (response) => {
+        response.resume();
+        resolve((response.statusCode ?? 500) < 400);
+      }
     );
-    return true;
-  } catch {
-    return false;
-  }
+    request.setTimeout(timeoutMs, () => {
+      request.destroy();
+      resolve(false);
+    });
+    request.on("error", () => resolve(false));
+    request.end();
+  });
 }
 
-function stopBackend(): void {
-  if (!backendProcess) {
+function waitForBackendExit(timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = backendProcess;
+    if (!child || child.exitCode !== null) {
+      resolve(true);
+      return;
+    }
+    const onExit = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      child.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    child.once("exit", onExit);
+  });
+}
+
+function killBackendTree(): void {
+  const child = backendProcess;
+  if (!child || child.exitCode !== null || !child.pid) {
     return;
   }
-  if (process.platform === "win32" && backendProcess.pid && requestFastBackendShutdown()) {
-    let fastShutdownCompleted = false;
+  if (process.platform === "win32") {
     try {
-      execFileSync("powershell.exe", ["-NoProfile", "-Command", `Wait-Process -Id ${backendProcess.pid} -Timeout 2`], {
+      execFileSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
         windowsHide: true,
         stdio: "ignore",
         timeout: 3000
-      });
-      fastShutdownCompleted = true;
-    } catch {
-      // Fall through to taskkill below if the fast shutdown request did not finish the process.
-    }
-    if (fastShutdownCompleted || backendProcess.exitCode !== null || backendProcess.killed) {
-      backendProcess = null;
-      return;
-    }
-  }
-  if (process.platform === "win32" && backendProcess.pid) {
-    try {
-      execFileSync("taskkill.exe", ["/PID", String(backendProcess.pid), "/T", "/F"], {
-        windowsHide: true,
-        stdio: "ignore",
-        timeout: 5000
       });
     } catch (error) {
       console.warn(`[backend] taskkill failed: ${String(error)}`);
     }
   } else {
-    backendProcess.kill();
+    child.kill("SIGKILL");
   }
+}
+
+async function stopBackendAsync(): Promise<void> {
+  const child = backendProcess;
+  if (!child) {
+    return;
+  }
+  if (process.platform === "win32") {
+    if (await postShutdownFast(1500)) {
+      if (await waitForBackendExit(4000)) {
+        backendProcess = null;
+        return;
+      }
+    }
+    killBackendTree();
+  } else {
+    child.kill();
+    if (!(await waitForBackendExit(5000))) {
+      child.kill("SIGKILL");
+    }
+  }
+  await waitForBackendExit(2000);
   backendProcess = null;
 }
 
@@ -181,22 +211,27 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", () => {
-  stopBackend();
+app.on("before-quit", (event) => {
+  if (quitInProgress || !backendProcess) {
+    return;
+  }
+  quitInProgress = true;
+  event.preventDefault();
+  const hardDeadline = new Promise<void>((resolve) => setTimeout(resolve, 8000));
+  void Promise.race([stopBackendAsync(), hardDeadline]).finally(() => app.exit(0));
 });
 
 process.once("SIGINT", () => {
-  stopBackend();
-  app.exit(0);
+  app.quit();
 });
 
 process.once("SIGTERM", () => {
-  stopBackend();
-  app.exit(0);
+  app.quit();
 });
 
 process.once("exit", () => {
-  stopBackend();
+  // Last-resort synchronous cleanup; normally the backend is already gone.
+  killBackendTree();
 });
 
 app.on("activate", () => {

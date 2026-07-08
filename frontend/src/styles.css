@@ -325,6 +325,12 @@ td {
   font-size: 13px;
 }
 
+.alert.reconnect {
+  border-color: #b8cbe0;
+  color: #1f4e79;
+  background: #f2f7fc;
+}
+
 .mode-toggle {
   margin-top: 8px;
   min-height: 34px;

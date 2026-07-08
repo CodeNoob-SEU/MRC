@@ -30,7 +30,9 @@ class DaqConfig:
     sample_rate_hz: int = 5000
     sample_period: int = 200000
     batch_points: int = 500
-    timeout_ms: int = 4000
+    # One batch is 100 ms of data at 5 kHz; keep this bounded so an in-flight
+    # USB3GetAi never delays shutdown for long (close waits for it to finish).
+    timeout_ms: int = 1000
     ai_range: float = 10.24
     threshold_volts: float = 2.5
     debounce_seconds: float = 0.010

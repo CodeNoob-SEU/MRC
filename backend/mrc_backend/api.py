@@ -42,6 +42,9 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
         allow_origins=[
             "http://127.0.0.1:5173",
             "http://localhost:5173",
+            # Packaged Electron loads the UI via file://, which sends
+            # `Origin: null`; without this every API call fails CORS.
+            "null",
         ],
         allow_credentials=True,
         allow_methods=["*"],
@@ -171,7 +174,15 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
     def shutdown_fast() -> Dict[str, Any]:
         def exit_soon() -> None:
             time.sleep(0.15)
-            coordinator.close_fast_without_sdk_teardown()
+            # Run cleanup on its own thread so os._exit is reached even if a
+            # vendor DLL call inside cleanup blocks forever.
+            cleanup = threading.Thread(
+                target=coordinator.close_fast_without_sdk_teardown,
+                name="mrc-fast-cleanup",
+                daemon=True,
+            )
+            cleanup.start()
+            cleanup.join(timeout=3.0)
             os._exit(0)
 
         threading.Thread(target=exit_soon, name="mrc-fast-shutdown", daemon=True).start()
@@ -191,12 +202,14 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
     async def websocket(websocket: WebSocket) -> None:
         await websocket.accept()
         queue = await event_bus.subscribe()
-        await websocket.send_json({"type": "status", "payload": coordinator.status_dict()})
         try:
+            await websocket.send_json({"type": "status", "payload": coordinator.status_dict()})
             while True:
                 event = await queue.get()
                 await websocket.send_json(event)
-        except WebSocketDisconnect:
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
             event_bus.unsubscribe(queue)
 
     return app

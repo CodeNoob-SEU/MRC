@@ -97,8 +97,12 @@ const cameraRotation = ref<PreviewRotation>(0);
 const cameraRotation2 = ref<PreviewRotation>(0);
 const thresholdVolts = ref(2.5);
 const errorMessage = ref("");
+const reconnectMessage = ref("");
 const recordingMode = ref<"trigger" | "manual">("trigger");
 let socket: WebSocket | null = null;
+let reconnectTimer: number | null = null;
+let reconnectMessageTimer: number | null = null;
+let disposed = false;
 let pendingPreviewSrc = "";
 let pendingPreviewSrc2 = "";
 let previewDecodeBusy = false;
@@ -157,7 +161,7 @@ const camera2Online = computed(() => Boolean(status.value?.camera2?.initialized)
 const daqOnline = computed(() => Boolean(status.value?.daq?.initialized));
 const hasPreviewFrame = computed(() => previewFrames.value.some(Boolean));
 const hasPreviewFrame2 = computed(() => previewFrames2.value.some(Boolean));
-const effectiveCameraFps = computed(() => status.value?.camera?.fps || cameraFps.value);
+const effectiveCameraFps = computed(() => Number(status.value?.camera?.fps) || Number(cameraFps.value) || 30);
 const videoStageStyle = computed(() => cameraStageStyle(status.value?.camera, cameraRotation.value));
 const videoStageStyle2 = computed(() => cameraStageStyle(status.value?.camera2 ?? status.value?.camera, cameraRotation2.value));
 const previewImageStyle = computed(() => previewRotationStyle(cameraRotation.value));
@@ -228,7 +232,27 @@ async function chooseOutputRoot() {
   }
 }
 
+function validatePositiveNumbers(fields: Array<[string, unknown]>): boolean {
+  for (const [label, value] of fields) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+      errorMessage.value = `${label}必须是大于 0 的数字`;
+      return false;
+    }
+  }
+  return true;
+}
+
 async function startExperiment() {
+  if (
+    !validatePositiveNumbers([
+      ["采集窗口", windowSeconds.value],
+      ["相机 FPS", cameraFps.value],
+      ["Trigger 阈值", thresholdVolts.value]
+    ])
+  ) {
+    return;
+  }
   busy.value = true;
   errorMessage.value = "";
   triggers.value = [];
@@ -250,6 +274,9 @@ async function startExperiment() {
 }
 
 async function startManualRecording() {
+  if (!validatePositiveNumbers([["相机 FPS", cameraFps.value]])) {
+    return;
+  }
   busy.value = true;
   errorMessage.value = "";
   triggers.value = [];
@@ -355,6 +382,9 @@ async function decodeLatestPreviewFrame2() {
 }
 
 function connectSocket() {
+  if (disposed) {
+    return;
+  }
   socket?.close();
   socket = new WebSocket(wsUrl);
   socket.onopen = () => {
@@ -362,7 +392,9 @@ function connectSocket() {
   };
   socket.onclose = () => {
     connection.value = "offline";
-    window.setTimeout(connectSocket, 1500);
+    if (!disposed) {
+      reconnectTimer = window.setTimeout(connectSocket, 1500);
+    }
   };
   socket.onerror = () => {
     connection.value = "offline";
@@ -391,6 +423,24 @@ function connectSocket() {
         previewError2.value = event.payload.message;
       } else {
         previewError.value = event.payload.message;
+      }
+    }
+    if (event.type === "reconnect") {
+      const deviceLabels: Record<string, string> = { camera1: "相机1", camera2: "相机2", daq: "采集卡" };
+      const device = deviceLabels[event.payload.device] ?? event.payload.device;
+      if (reconnectMessageTimer !== null) {
+        window.clearTimeout(reconnectMessageTimer);
+        reconnectMessageTimer = null;
+      }
+      if (event.payload.status === "attempting") {
+        reconnectMessage.value = `${device}连接异常，正在自动重连…`;
+      } else if (event.payload.status === "ok") {
+        reconnectMessage.value = `${device}重连成功`;
+        reconnectMessageTimer = window.setTimeout(() => {
+          reconnectMessage.value = "";
+        }, 5000);
+      } else {
+        reconnectMessage.value = `${device}自动重连失败${event.payload.message ? `：${event.payload.message}` : ""}`;
       }
     }
     if (event.type === "error") {
@@ -424,6 +474,15 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  disposed = true;
+  if (reconnectTimer !== null) {
+    window.clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (reconnectMessageTimer !== null) {
+    window.clearTimeout(reconnectMessageTimer);
+    reconnectMessageTimer = null;
+  }
   socket?.close();
 });
 </script>
@@ -548,6 +607,11 @@ onUnmounted(() => {
           <span>{{ errorMessage || status?.last_error }}</span>
         </section>
 
+        <section v-if="reconnectMessage" class="alert reconnect">
+          <RotateCw :size="17" />
+          <span>{{ reconnectMessage }}</span>
+        </section>
+
         <div class="mode-toggle">
           <span>录制模式</span>
           <div>
@@ -569,7 +633,7 @@ onUnmounted(() => {
         </div>
 
         <div class="control-actions">
-          <button class="secondary" :disabled="busy" @click="initialize">
+          <button class="secondary" :disabled="!canStart" @click="initialize">
             <RotateCw :size="17" />
             初始化
           </button>
