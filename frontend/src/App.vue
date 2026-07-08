@@ -11,6 +11,8 @@ type HardwareStatus = {
   device_name?: string;
   sample_rate_hz?: number;
   trigger_channel?: number;
+  width?: number;
+  height?: number;
   fps?: number;
   active_file?: string | null;
   capture_status?: string;
@@ -87,7 +89,7 @@ const previewError2 = ref("");
 const connection = ref("connecting");
 const busy = ref(false);
 const outputRoot = ref("runs");
-const windowMinutes = ref(6);
+const windowSeconds = ref(360);
 const cameraFps = ref(30);
 const thresholdVolts = ref(2.5);
 const errorMessage = ref("");
@@ -152,6 +154,8 @@ const daqOnline = computed(() => Boolean(status.value?.daq?.initialized));
 const hasPreviewFrame = computed(() => previewFrames.value.some(Boolean));
 const hasPreviewFrame2 = computed(() => previewFrames2.value.some(Boolean));
 const effectiveCameraFps = computed(() => status.value?.camera?.fps || cameraFps.value);
+const videoStageStyle = computed(() => cameraStageStyle(status.value?.camera));
+const videoStageStyle2 = computed(() => cameraStageStyle(status.value?.camera2 ?? status.value?.camera));
 const trimStatusLabel = computed(() => {
   if (status.value?.aligned_video_file) {
     return "裁剪完成";
@@ -161,6 +165,17 @@ const trimStatusLabel = computed(() => {
   }
   return status.value?.camera?.preview_status || status.value?.camera?.capture_status || "等待硬件状态";
 });
+
+function cameraStageStyle(camera: HardwareStatus | null | undefined) {
+  const width = Number(camera?.width || 720);
+  const height = Number(camera?.height || 480);
+  const safeWidth = Number.isFinite(width) && width > 0 ? width : 720;
+  const safeHeight = Number.isFinite(height) && height > 0 ? height : 480;
+  return {
+    "--video-aspect-width": String(safeWidth),
+    "--video-aspect-height": String(safeHeight)
+  };
+}
 
 async function api(path: string, init?: RequestInit) {
   const response = await fetch(`${backendUrl}${path}`, {
@@ -209,7 +224,7 @@ async function startExperiment() {
       method: "POST",
       body: JSON.stringify({
         output_root: outputRoot.value,
-        window_minutes: windowMinutes.value,
+        window_minutes: windowSeconds.value / 60,
         camera_fps: cameraFps.value,
         threshold_volts: thresholdVolts.value
       })
@@ -411,7 +426,7 @@ onUnmounted(() => {
           </span>
           <small>{{ status?.camera?.recording ? "REC" : "LIVE" }}</small>
         </div>
-        <div class="video-stage">
+        <div class="video-stage" :style="videoStageStyle">
           <img
             v-for="(frame, index) in previewFrames"
             v-show="frame"
@@ -435,7 +450,7 @@ onUnmounted(() => {
           </span>
           <small>{{ status?.camera2?.recording ? "REC" : status?.camera2?.initialized ? "LIVE" : "disabled" }}</small>
         </div>
-        <div class="video-stage" :class="{ 'video-placeholder': !status?.camera2 }">
+        <div class="video-stage" :class="{ 'video-placeholder': !status?.camera2 }" :style="videoStageStyle2">
           <img
             v-for="(frame, index) in previewFrames2"
             v-show="frame"
@@ -583,8 +598,8 @@ onUnmounted(() => {
                 <small>输出目录：{{ outputPath }}</small>
               </label>
               <label>
-                <span>采集窗口 min</span>
-                <input v-model.number="windowMinutes" type="number" min="0.01" step="0.01" />
+                <span>采集窗口 s</span>
+                <input v-model.number="windowSeconds" type="number" min="1" step="1" />
               </label>
               <label>
                 <span>相机 FPS · 当前 {{ effectiveCameraFps.toFixed(1) }}</span>
