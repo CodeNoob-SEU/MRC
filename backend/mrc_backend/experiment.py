@@ -363,20 +363,45 @@ class ExperimentCoordinator:
         if worker is not None and worker.is_alive():
             worker.join(timeout=5.0)
         with self._lock:
-            if self._status.state in {"armed", "recording"}:
-                self._set_finished_locked("stopped")
-            elif self._status.state == "manual_recording":
-                try:
-                    self._stop_all_cameras()
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.warning("Camera stop for manual recording failed: %s", exc)
-                    self._status.last_error = str(exc)
+            state = self._status.state
+        # Hardware teardown happens outside the coordinator lock so a slow or
+        # unresponsive camera cannot freeze /status and the UI meanwhile.
+        if state in {"armed", "recording"}:
+            self._halt_hardware_best_effort(stop_daq=True)
+            with self._lock:
+                self._status.state = "stopped"
+                self._refresh_hardware_status_locked()
+                self._worker = None
+        elif state == "manual_recording":
+            self._halt_hardware_best_effort(stop_daq=False)
+            with self._lock:
                 self._status.state = "manual_stopped"
-                self._status.camera = asdict(self.camera.status())
-                self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
-                self._status.daq = asdict(self.daq.status())
+                self._refresh_hardware_status_locked()
         self.event_bus.publish("status", self.status_dict())
         return self.status()
+
+    def _halt_hardware_best_effort(self, stop_daq: bool) -> None:
+        # Never let hardware teardown failures escape: an exception here
+        # would leave the state machine stuck with no way to recover short
+        # of restarting the backend.
+        if stop_daq:
+            try:
+                self.daq.stop_sampling()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warning("DAQ stop failed: %s", exc)
+                with self._lock:
+                    self._status.last_error = str(exc)
+        try:
+            self._stop_all_cameras()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("Camera stop failed: %s", exc)
+            with self._lock:
+                self._status.last_error = str(exc)
+
+    def _refresh_hardware_status_locked(self) -> None:
+        self._status.camera = asdict(self.camera.status())
+        self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
+        self._status.daq = asdict(self.daq.status())
 
     def status(self) -> ExperimentStatus:
         with self._lock:
@@ -563,26 +588,6 @@ class ExperimentCoordinator:
             self._status.daq = asdict(self.daq.status())
         self.event_bus.publish("error", {"message": message})
         self.event_bus.publish("status", self.status_dict())
-
-    def _set_finished_locked(self, state: str = "finished") -> None:
-        # Never let hardware teardown failures escape: an exception here would
-        # leave the state machine stuck in "recording" with no way to recover
-        # short of restarting the backend.
-        try:
-            self.daq.stop_sampling()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.warning("DAQ stop while finishing failed: %s", exc)
-            self._status.last_error = str(exc)
-        try:
-            self._stop_all_cameras()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.warning("Camera stop while finishing failed: %s", exc)
-            self._status.last_error = str(exc)
-        self._status.state = state
-        self._status.camera = asdict(self.camera.status())
-        self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
-        self._status.daq = asdict(self.daq.status())
-        self._worker = None
 
     def _finalize_trigger_capture_locked(self, state: str = "finalizing") -> None:
         self.daq.stop_sampling()

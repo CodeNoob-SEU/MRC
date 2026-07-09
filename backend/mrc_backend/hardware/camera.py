@@ -1084,8 +1084,14 @@ class DXMediaCamera(BaseCamera):
 
 
 def build_camera(mode: str, config: CameraConfig, repo_root: Path) -> BaseCamera:
-    if mode == "real":
-        return DXMediaCamera(config, repo_root)
-    if mode == "auto" and platform.system() == "Windows":
-        return DXMediaCamera(config, repo_root)
-    return MockCamera()
+    use_real = mode == "real" or (mode == "auto" and platform.system() == "Windows")
+    if not use_real:
+        return MockCamera()
+    isolation = os.getenv("MRC_CAMERA_PROCESS_ISOLATION", "1").lower() not in {"0", "false", "no", "off"}
+    if isolation:
+        # Run the vendor SDK in a child process so a wedged driver call can
+        # never make the backend itself unkillable.
+        from .camera_process import CameraProcessProxy
+
+        return CameraProcessProxy(config, repo_root)
+    return DXMediaCamera(config, repo_root)
