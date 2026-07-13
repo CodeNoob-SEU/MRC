@@ -12,11 +12,15 @@ let mainWindow: BrowserWindow | null = null;
 let backendProcess: ChildProcessWithoutNullStreams | null = null;
 let quitInProgress = false;
 
+function appRoot(): string {
+  return app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..", "..");
+}
+
 function clearBackendPort(): boolean {
   if (process.env.MRC_SKIP_PORT_CLEANUP === "1" || process.platform !== "win32") {
     return true;
   }
-  const repoRoot = path.resolve(__dirname, "..", "..");
+  const repoRoot = appRoot();
   const scriptPath = path.join(repoRoot, "scripts", "ensure_backend_port_windows.ps1");
   if (!fs.existsSync(scriptPath)) {
     console.warn(`[backend] port cleanup script not found: ${scriptPath}`);
@@ -42,19 +46,35 @@ function startBackend(): void {
   if (!clearBackendPort()) {
     return;
   }
-  const backendDir = path.resolve(__dirname, "..", "..", "backend");
+  const repoRoot = appRoot();
+  const backendDir = path.join(repoRoot, "backend");
   const venvPython =
     process.platform === "win32"
-      ? path.join(backendDir, ".venv", "Scripts", "python.exe")
+      ? app.isPackaged
+        ? path.join(repoRoot, "python", "python.exe")
+        : path.join(backendDir, ".venv32", "Scripts", "python.exe")
       : path.join(backendDir, ".venv", "bin", "python");
   const python =
     process.env.MRC_PYTHON ??
     (fs.existsSync(venvPython) ? venvPython : process.platform === "win32" ? "python" : "python3");
+  const ffmpeg = path.join(repoRoot, "vendor", "ffmpeg", "windows", "bin", "ffmpeg.exe");
+  const packagedDefaults: NodeJS.ProcessEnv = app.isPackaged
+    ? {
+        MRC_HARDWARE_MODE: "real",
+        MRC_VENDOR_ARCH: "win32",
+        MRC_FAST_BACKEND_SHUTDOWN: "1",
+        MRC_OUTPUT_ROOT: path.join(app.getPath("documents"), "MRC Runs"),
+        ...(fs.existsSync(ffmpeg) ? { MRC_FFMPEG: ffmpeg } : {})
+      }
+    : {};
   backendProcess = spawn(python, ["-m", "mrc_backend.run_backend"], {
     cwd: backendDir,
+    windowsHide: true,
     env: {
+      ...packagedDefaults,
       ...process.env,
       PYTHONPATH: backendDir,
+      PYTHONUTF8: "1",
       MRC_BACKEND_PORT: BACKEND_PORT
     }
   });
@@ -178,11 +198,13 @@ function createWindow(): void {
     return { action: "deny" };
   });
 
-  if (!app.isPackaged) {
+  // MRC_UI_MODE=dist loads the built renderer without a vite dev server —
+  // used by the portable bundle, which runs electron unpackaged.
+  if (app.isPackaged || process.env.MRC_UI_MODE === "dist") {
+    mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+  } else {
     mainWindow.loadURL("http://127.0.0.1:5173");
     mainWindow.webContents.openDevTools({ mode: "detach" });
-  } else {
-    mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
 }
 
