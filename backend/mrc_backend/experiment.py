@@ -102,22 +102,54 @@ class ExperimentCoordinator:
     _DAQ_RECOVERY_WAIT_SECONDS = 2.0
 
     def initialize(self) -> ExperimentStatus:
+        """Initialize each device independently.
+
+        A missing device (e.g. no DAQ plugged in) must not block the others:
+        manual recording only needs a camera, so partial success is returned
+        with a warning instead of failing the whole initialization.
+        """
         with self._lock:
             if self._status.state in self._ACTIVE_STATES:
                 raise RuntimeError("Cannot re-initialize hardware while an experiment is running.")
-            camera_status = self.camera.initialize()
-            self._camera_desired.add(1)
-            camera2_status = None
-            if self.camera2:
-                camera2_status = self.camera2.initialize()
-                self._camera_desired.add(2)
-            daq_status = self.daq.initialize()
-            self._status.camera = asdict(camera_status)
-            self._status.camera2 = asdict(camera2_status) if camera2_status else None
-            self._status.daq = asdict(daq_status)
-            self._status.last_error = None
-            self._ensure_preview_worker_locked()
+            errors: List[str] = []
+            camera_ok = False
+            daq_ok = False
+            try:
+                self._status.camera = asdict(self.camera.initialize())
+                self._camera_desired.add(1)
+                camera_ok = True
+            except Exception as exc:  # noqa: BLE001
+                self._status.camera = asdict(self.camera.status())
+                errors.append(f"camera1: {exc}")
+            if self.camera2 is not None:
+                try:
+                    self._status.camera2 = asdict(self.camera2.initialize())
+                    self._camera_desired.add(2)
+                    camera_ok = True
+                except Exception as exc:  # noqa: BLE001
+                    self._status.camera2 = asdict(self.camera2.status())
+                    errors.append(f"camera2: {exc}")
+            else:
+                self._status.camera2 = None
+            try:
+                self._status.daq = asdict(self.daq.initialize())
+                daq_ok = True
+            except Exception as exc:  # noqa: BLE001
+                self._status.daq = asdict(self.daq.status())
+                errors.append(f"daq: {exc}")
+            if errors and (camera_ok or daq_ok):
+                self._status.last_error = (
+                    "部分设备初始化失败（已就绪的设备仍可使用）: " + "; ".join(errors)
+                )
+            elif errors:
+                self._status.last_error = "; ".join(errors)
+            else:
+                self._status.last_error = None
+            if camera_ok:
+                self._ensure_preview_worker_locked()
         self.event_bus.publish("status", self.status_dict())
+        if errors and not camera_ok and not daq_ok:
+            raise RuntimeError("; ".join(errors))
         return self.status()
 
     def devices(self) -> Dict[str, Any]:
