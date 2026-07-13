@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -137,7 +138,7 @@ class CoordinatorMockTest(unittest.TestCase):
             self.assertEqual(int(trigger_rows[1]["frame_index_from_t0"]), expected_second_frame)
             self.assertEqual(trigger_rows[0]["timebase"], "daq_sample_clock")
 
-            with sqlite3.connect(output_dir / "triggers.sqlite3") as db:
+            with closing(sqlite3.connect(output_dir / "triggers.sqlite3")) as db:
                 db_row = db.execute(
                     "select sample_offset_from_t0, frame_index_from_t0, video_frame_index_estimated, timebase "
                     "from triggers order by trigger_index limit 1"

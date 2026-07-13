@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -705,7 +706,10 @@ class ExperimentCoordinator:
         alignment: Optional[Dict[str, Any]] = None
 
         try:
-            with trigger_csv.open("w", newline="", encoding="utf-8") as csv_file, sqlite3.connect(db_path) as db:
+            # closing() matters on Windows: sqlite3's context manager only
+            # scopes a transaction and leaves the file handle open, which
+            # keeps triggers.sqlite3 locked.
+            with trigger_csv.open("w", newline="", encoding="utf-8") as csv_file, closing(sqlite3.connect(db_path)) as db:
                 writer = csv.DictWriter(
                     csv_file,
                     fieldnames=[
@@ -874,7 +878,10 @@ class ExperimentCoordinator:
                             self._write_alignment(alignment_path, alignment)
                             with self._lock:
                                 self._status.state = "finished"
-                                self._worker = None
+                                # Keep the worker reference so stop/close can
+                                # join until the thread has fully exited and
+                                # released its file handles (Windows locks
+                                # them until then).
                             self.event_bus.publish("status", self.status_dict())
                         return
         except Exception as exc:  # noqa: BLE001
@@ -1076,7 +1083,7 @@ class ExperimentCoordinator:
         usable_start = int(alignment["usable_video_frame_start"])
         target_end_sample = int(alignment["target_end_sample"])
         try:
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 rows = db.execute(
                     "select trigger_index, absolute_time, relative_time_seconds, sample_number, "
                     "window_remaining, sample_offset_from_t0, timebase from triggers order by trigger_index"

@@ -4,6 +4,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from mrc_backend.config import AppConfig
@@ -74,7 +75,7 @@ class MeasuredFpsAlignmentTest(unittest.TestCase):
             output_dir = Path(temp_dir)
             coordinator = make_coordinator(AppConfig())
             db_path = output_dir / "triggers.sqlite3"
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 db.execute(
                     """
                     create table triggers (
@@ -111,7 +112,7 @@ class MeasuredFpsAlignmentTest(unittest.TestCase):
             coordinator._rewrite_trigger_frames(output_dir, alignment)
 
             expected_frame = 1 + round(10.0 * 29.8)  # 299
-            with sqlite3.connect(db_path) as db:
+            with closing(sqlite3.connect(db_path)) as db:
                 row1, row2 = db.execute(
                     "select frame_index_from_t0, video_frame_index_estimated, frame_mapping_mode "
                     "from triggers order by trigger_index"
