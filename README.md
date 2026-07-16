@@ -40,6 +40,27 @@ Useful run options:
 
 Real mode expects installed camera and USB3000 drivers. This project defaults to 32-bit Python on Windows because the working vendor demo and SDK path are win32.
 
+## Build A Portable Windows x64 EXE
+
+On macOS or Linux with Node.js and Python 3 installed:
+
+```bash
+cd frontend
+npm install
+npm run dist:win:x64
+```
+
+The build downloads and bundles the Windows x86 Python backend required by the
+camera SDK, bundles FFmpeg and the hardware runtime DLLs, and produces:
+
+```text
+frontend/release/MRC-Integrated-Acquisition-0.1.0-Windows-x64.exe
+```
+
+The Electron application is Windows x64. The bundled backend remains x86 so it
+can load the working win32 camera and DAQ SDKs. Target machines still need the
+vendor hardware drivers installed.
+
 ## Hardware Diagnostics
 
 After starting real mode, use these commands in another PowerShell window:
@@ -50,6 +71,37 @@ curl http://127.0.0.1:7876/diagnostics/hardware
 ```
 
 `/diagnostics/hardware` checks the camera and DAQ separately, so one failing device will not hide the other device's status.
+
+## Troubleshooting: Green Preview / Device Won't Open (无需重启电脑)
+
+Two field-confirmed failure modes share the same root cause and the same fix.
+A camera-worker process that wedged inside an uncancellable kernel call of the
+capture driver survives `taskkill /F` and keeps the driver's capture channel
+occupied. Symptoms:
+
+1. **纯绿画面** — the pipeline runs but the driver only delivers zeroed YUV
+   buffers (an untouched buffer decodes to solid green).
+2. **新会话打不开设备** — a fresh app start fails to initialize the camera
+   because the zombie still holds the device.
+
+Do NOT reboot. Reset the capture device instead — the PnP disable/enable
+cycle forces the driver to cancel its outstanding I/O, which lets the stuck
+thread return and the zombie terminate within seconds:
+
+```powershell
+# Run PowerShell as Administrator
+.\scripts\reset_capture_device_windows.ps1                      # first time: list devices
+.\scripts\reset_capture_device_windows.ps1 -NameLike "*Video*"  # reset the matching device
+```
+
+Physically unplugging and replugging the capture device achieves the same
+thing. After the reset, confirm in Task Manager that the leftover python
+process is gone, then start the app again.
+
+Prevention: in Device Manager, disable "Allow the computer to turn off this
+device to save power" for the capture device and USB root hubs, and turn off
+USB selective suspend in the power plan. Plug the capture device into a
+motherboard USB port rather than a shared hub.
 
 ## Standalone Camera Probe
 

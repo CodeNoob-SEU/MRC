@@ -3,8 +3,11 @@ frontend/node_modules/
 frontend/.npm-cache/
 frontend/dist/
 frontend/dist-electron/
+frontend/build/
+frontend/release/
 runs/
 *.pyc
 __pycache__/
 .download/
 vendor/ffmpeg/windows/
+logs/

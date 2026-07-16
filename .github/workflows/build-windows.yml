@@ -86,7 +86,7 @@ jobs:
           $repoName = Split-Path $workspace -Leaf
           7z a "$workspace\MRC-windows-${{ matrix.arch }}.zip" $repoName `
             "-xr!.git" "-xr!.github" "-xr!__pycache__" "-xr!.pytest_cache" `
-            "-xr!.npm-cache" "-xr!.venv" "-xr!.venv32" "-xr!MRC-windows-*.zip"
+            "-xr!.npm-cache" "-xr!.venv" "-xr!.venv32" "-xr!logs" "-xr!MRC-windows-*.zip"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from .config import AppConfig
 from .events import EventBus
-from .experiment import ExperimentCoordinator
+from .experiment import ExperimentCoordinator, ImageAdjustSettings
 
 
 class StartExperimentRequest(BaseModel):
@@ -23,6 +23,20 @@ class StartExperimentRequest(BaseModel):
     window_minutes: Optional[float] = None
     camera_fps: Optional[float] = None
     threshold_volts: Optional[float] = None
+
+
+class RecoverCameraRequest(BaseModel):
+    camera_id: int = 1
+
+
+class ImageAdjustRequest(BaseModel):
+    target: str = "both"
+    write_to_video: bool = False
+    brightness: float = 1.0
+    contrast: float = 1.0
+    gamma: float = 1.0
+    saturation: float = 1.0
+    sharpness: float = 0.0
 
 
 class StartManualRecordingRequest(BaseModel):
@@ -187,6 +201,30 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
 
         threading.Thread(target=exit_soon, name="mrc-fast-shutdown", daemon=True).start()
         return {"ok": True, "mode": "fast_without_camera_sdk_teardown"}
+
+    @app.post("/recover/camera")
+    def recover_camera(request: RecoverCameraRequest) -> Dict[str, Any]:
+        try:
+            return coordinator.recover_camera(request.camera_id)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/image-adjust")
+    def image_adjust(request: ImageAdjustRequest) -> Dict[str, Any]:
+        try:
+            return coordinator.set_image_adjust(
+                target=request.target,
+                write_to_video=request.write_to_video,
+                settings=ImageAdjustSettings(
+                    brightness=request.brightness,
+                    contrast=request.contrast,
+                    gamma=request.gamma,
+                    saturation=request.saturation,
+                    sharpness=request.sharpness,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/manual-recording/start")
     def start_manual_recording(request: StartManualRecordingRequest) -> Dict[str, Any]:

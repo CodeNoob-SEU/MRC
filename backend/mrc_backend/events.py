@@ -32,7 +32,12 @@ class EventBus:
             for client in list(self._clients):
                 self._enqueue_latest(client, event)
 
-        self._loop.call_soon_threadsafe(enqueue)
+        try:
+            self._loop.call_soon_threadsafe(enqueue)
+        except RuntimeError:
+            # The event loop is closed (backend shutting down); publishing
+            # from worker threads must never raise into their cleanup paths.
+            pass
 
     async def subscribe(self) -> asyncio.Queue[Dict[str, Any]]:
         queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=64)

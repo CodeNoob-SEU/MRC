@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from .config import AppConfig
 from .events import EventBus
+from .hardware import device_reset
 from .hardware.camera import BaseCamera, CameraStatus, build_camera
 from .hardware.daq import BaseDaq, DaqError, DaqStatus, TriggerDetector, build_daq
 
@@ -56,6 +57,24 @@ class ExperimentStatus:
 
 
 @dataclass
+class ImageAdjustSettings:
+    brightness: float = 1.0
+    contrast: float = 1.0
+    gamma: float = 1.0
+    saturation: float = 1.0
+    sharpness: float = 0.0
+
+    def is_identity(self) -> bool:
+        return (
+            abs(self.brightness - 1.0) < 1e-3
+            and abs(self.contrast - 1.0) < 1e-3
+            and abs(self.gamma - 1.0) < 1e-3
+            and abs(self.saturation - 1.0) < 1e-3
+            and self.sharpness < 1e-3
+        )
+
+
+@dataclass
 class SyncStartContext:
     camera_start_call_enter_monotonic_ns: int
     camera_recording_started_monotonic_ns: int
@@ -89,6 +108,23 @@ class ExperimentCoordinator:
         # Wall-clock stop instant per camera, used to measure the real
         # capture fps (frames written / wall recording duration).
         self._camera_stop_monotonic_ns: Dict[int, int] = {}
+        # Real-time image adjustment settings per camera; when
+        # _adjust_write_to_video is on they are baked into the re-encoded
+        # output videos (the raw SDK recording always stays untouched).
+        self._image_adjust: Dict[int, ImageAdjustSettings] = {
+            1: ImageAdjustSettings(),
+            2: ImageAdjustSettings(),
+        }
+        self._adjust_write_to_video = False
+        # Self-healing escalation state: repeated reconnect failures trigger
+        # an automatic PnP device reset (admin only, rate limited).
+        self._reconnect_failures: Dict[int, int] = {}
+        self._last_device_reset_monotonic: Optional[float] = None
+        self._auto_device_reset = os.getenv("MRC_AUTO_DEVICE_RESET", "1").lower() in {"1", "true", "yes", "on"}
+        self._pnp_name_like = os.getenv("MRC_CAMERA_PNP_NAME_LIKE", "")
+        # A uniform frame (e.g. all-green) compresses to a tiny JPEG; treat
+        # persistently tiny previews as a fault. 0 disables the check.
+        self._preview_min_jpeg_bytes = int(os.getenv("MRC_PREVIEW_MIN_JPEG_BYTES", "4096"))
         self._status = ExperimentStatus(
             camera=asdict(self.camera.status()),
             camera2=asdict(self.camera2.status()) if self.camera2 else None,
@@ -101,6 +137,8 @@ class ExperimentCoordinator:
     _RECONNECT_COOLDOWN_SECONDS = 10.0
     _DAQ_RECOVERY_ATTEMPTS = 3
     _DAQ_RECOVERY_WAIT_SECONDS = 2.0
+    _RECONNECT_FAILURES_BEFORE_RESET = 2
+    _DEVICE_RESET_COOLDOWN_SECONDS = 300.0
 
     def initialize(self) -> ExperimentStatus:
         """Initialize each device independently.
@@ -252,6 +290,7 @@ class ExperimentCoordinator:
             session_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
             output_dir = root / session_id
             output_dir.mkdir(parents=True, exist_ok=True)
+            self._ensure_disk_space(output_dir)
             self.config.write_snapshot(output_dir / "config_snapshot.json")
             (output_dir / "events.jsonl").write_text("", encoding="utf-8")
             video_suffix = ".avi" if self.config.camera.capture_format == 1 else ".mp4"
@@ -343,6 +382,7 @@ class ExperimentCoordinator:
             session_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
             output_dir = root / session_id
             output_dir.mkdir(parents=True, exist_ok=True)
+            self._ensure_disk_space(output_dir)
             self.config.write_snapshot(output_dir / "config_snapshot.json")
             events_path = output_dir / "events.jsonl"
             events_path.write_text("", encoding="utf-8")
@@ -410,6 +450,10 @@ class ExperimentCoordinator:
             with self._lock:
                 self._status.state = "manual_stopped"
                 self._refresh_hardware_status_locked()
+                manual_videos = [(1, self._status.video_file), (2, self._status.video_file2)]
+            # Manual recordings have no trim step; bake the adjustments into
+            # a separate *_adjusted copy in the background when requested.
+            self._start_adjusted_copies(manual_videos)
         self.event_bus.publish("status", self.status_dict())
         return self.status()
 
@@ -498,6 +542,133 @@ class ExperimentCoordinator:
         except Exception as exc:  # noqa: BLE001
             self._logger.warning("DAQ cleanup during fast shutdown failed: %s", exc)
 
+    _ADJUST_TARGETS = {"cam1": (1,), "cam2": (2,), "both": (1, 2)}
+
+    def set_image_adjust(
+        self,
+        target: str,
+        write_to_video: bool,
+        settings: ImageAdjustSettings,
+    ) -> Dict[str, Any]:
+        if target not in self._ADJUST_TARGETS:
+            raise ValueError(f"Unknown image adjust target: {target}")
+        clamped = ImageAdjustSettings(
+            brightness=min(4.0, max(0.25, float(settings.brightness))),
+            contrast=min(4.0, max(0.25, float(settings.contrast))),
+            gamma=min(10.0, max(0.1, float(settings.gamma))),
+            saturation=min(3.0, max(0.0, float(settings.saturation))),
+            sharpness=min(1.0, max(0.0, float(settings.sharpness))),
+        )
+        applied_to = self._ADJUST_TARGETS[target]
+        with self._lock:
+            for camera_id in (1, 2):
+                self._image_adjust[camera_id] = (
+                    replace(clamped) if camera_id in applied_to else ImageAdjustSettings()
+                )
+            self._adjust_write_to_video = bool(write_to_video)
+        return {
+            "ok": True,
+            "target": target,
+            "write_to_video": bool(write_to_video),
+            "settings": asdict(clamped),
+        }
+
+    @staticmethod
+    def _build_adjust_video_filter(settings: ImageAdjustSettings) -> Optional[str]:
+        if settings.is_identity():
+            return None
+        # Match the CSS preview: brightness there is multiplicative and is
+        # applied before contrast. ffmpeg eq computes y=(x-0.5)*C+0.5+B, so
+        # C=b*c and B=0.5*c*(b-1) reproduce the same overall curve.
+        b = settings.brightness
+        c = settings.contrast
+        parts = [
+            "eq=contrast={:.4f}:brightness={:.4f}:gamma={:.4f}:saturation={:.4f}".format(
+                b * c,
+                0.5 * c * (b - 1.0),
+                settings.gamma,
+                settings.saturation,
+            )
+        ]
+        if settings.sharpness > 1e-3:
+            parts.append(f"unsharp=5:5:{min(1.5, settings.sharpness * 1.5):.3f}")
+        return ",".join(parts)
+
+    def _adjust_filter_for_camera(self, camera_id: int) -> Optional[str]:
+        with self._lock:
+            if not self._adjust_write_to_video:
+                return None
+            settings = replace(self._image_adjust[camera_id])
+        return self._build_adjust_video_filter(settings)
+
+    def _start_adjusted_copies(self, video_files: List[tuple[int, Optional[str]]]) -> None:
+        jobs: List[tuple[int, Path, str]] = []
+        for camera_id, file_text in video_files:
+            if not file_text:
+                continue
+            video_filter = self._adjust_filter_for_camera(camera_id)
+            if video_filter:
+                jobs.append((camera_id, Path(file_text), video_filter))
+        if not jobs:
+            return
+        threading.Thread(
+            target=self._write_adjusted_copies,
+            args=(jobs,),
+            name="mrc-adjusted-copy",
+            daemon=True,
+        ).start()
+
+    def _write_adjusted_copies(self, jobs: List[tuple[int, Path, str]]) -> None:
+        ffmpeg = self._resolve_ffmpeg_executable()
+        if not ffmpeg:
+            self.event_bus.publish("notice", {"message": "未找到 ffmpeg，无法生成调整后的视频副本"})
+            return
+        for camera_id, source, video_filter in jobs:
+            if not source.exists() or source.stat().st_size == 0:
+                continue
+            output = source.with_name(f"{source.stem}_adjusted{source.suffix}")
+            self.event_bus.publish("notice", {"message": f"正在生成相机{camera_id}调整后视频…"})
+            command = [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(source),
+                "-vf",
+                video_filter,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "18",
+                "-c:a",
+                "copy",
+                str(output),
+            ]
+            try:
+                completed = self._run_tracked(command, timeout=1800)
+            except Exception as exc:  # noqa: BLE001
+                self.event_bus.publish("notice", {"message": f"相机{camera_id}调整后视频生成失败: {exc}"})
+                continue
+            if completed.returncode == 0 and output.exists() and output.stat().st_size > 0:
+                self.event_bus.publish("notice", {"message": f"相机{camera_id}调整后视频已保存: {output.name}"})
+                self._append_jsonl(
+                    source.parent / "events.jsonl",
+                    {
+                        "type": "adjusted_video",
+                        "payload": {
+                            "camera_id": camera_id,
+                            "output_file": str(output),
+                            "video_filter": video_filter,
+                        },
+                    },
+                )
+            else:
+                self.event_bus.publish(
+                    "notice",
+                    {"message": f"相机{camera_id}调整后视频生成失败 (ffmpeg code {completed.returncode})"},
+                )
+
     def _ensure_preview_worker_locked(self) -> None:
         if self._preview_worker is not None and self._preview_worker.is_alive():
             return
@@ -514,7 +685,29 @@ class ExperimentCoordinator:
         last_error_at: Dict[int, float] = {}
         consecutive_failures: Dict[int, int] = {}
         last_reconnect_at: Dict[int, float] = {}
-        while not self._preview_stop_event.is_set():
+
+        def handle_failure(camera_id: int, camera: BaseCamera, message: str, state_active: bool) -> None:
+            now = time.monotonic()
+            consecutive_failures[camera_id] = consecutive_failures.get(camera_id, 0) + 1
+            if message != last_error_message.get(camera_id) or now - last_error_at.get(camera_id, 0.0) >= 1.0:
+                self.event_bus.publish("preview_error", {"camera_id": camera_id, "message": message})
+                last_error_message[camera_id] = message
+                last_error_at[camera_id] = now
+            # Reconnect only outside active recordings: restarting a camera
+            # mid-run would invalidate the t0 alignment.
+            if (
+                camera_id in self._camera_desired
+                and not state_active
+                and consecutive_failures[camera_id] >= self._RECONNECT_FAILURE_THRESHOLD
+                and now - last_reconnect_at.get(camera_id, -self._RECONNECT_COOLDOWN_SECONDS)
+                >= self._RECONNECT_COOLDOWN_SECONDS
+                and not self._preview_stop_event.is_set()
+            ):
+                last_reconnect_at[camera_id] = now
+                if self._try_reconnect_camera(camera_id, camera):
+                    consecutive_failures[camera_id] = 0
+
+        def tick() -> None:
             preview_fps = self._effective_preview_fps()
             interval_seconds = 1.0 / preview_fps
             started_at = time.monotonic()
@@ -524,7 +717,6 @@ class ExperimentCoordinator:
                 try:
                     frame = camera.preview_frame_data_url()
                     if frame:
-                        consecutive_failures[camera_id] = 0
                         camera_status = camera.status()
                         self.event_bus.publish(
                             "preview",
@@ -536,34 +728,50 @@ class ExperimentCoordinator:
                                 "fps": preview_fps,
                             },
                         )
-                        last_error_message[camera_id] = ""
-                except Exception as exc:  # noqa: BLE001
-                    message = str(exc)
-                    now = time.monotonic()
-                    consecutive_failures[camera_id] = consecutive_failures.get(camera_id, 0) + 1
-                    if message != last_error_message.get(camera_id) or now - last_error_at.get(camera_id, 0.0) >= 1.0:
-                        self.event_bus.publish("preview_error", {"camera_id": camera_id, "message": message})
-                        last_error_message[camera_id] = message
-                        last_error_at[camera_id] = now
-                    # Reconnect only outside active recordings: restarting a
-                    # camera mid-run would invalidate the t0 alignment.
-                    if (
-                        camera_id in self._camera_desired
-                        and not state_active
-                        and consecutive_failures[camera_id] >= self._RECONNECT_FAILURE_THRESHOLD
-                        and now - last_reconnect_at.get(camera_id, -self._RECONNECT_COOLDOWN_SECONDS)
-                        >= self._RECONNECT_COOLDOWN_SECONDS
-                        and not self._preview_stop_event.is_set()
-                    ):
-                        last_reconnect_at[camera_id] = now
-                        if self._try_reconnect_camera(camera_id, camera):
+                        # A wedged driver keeps delivering zero-filled buffers
+                        # that render as a uniform (green) frame and compress
+                        # to a tiny JPEG; treat that as a fault so the
+                        # reconnect/device-reset ladder can recover it.
+                        approx_bytes = int(len(frame) * 0.75)
+                        if (
+                            self._preview_min_jpeg_bytes > 0
+                            and frame.startswith("data:image/jpeg")
+                            and approx_bytes < self._preview_min_jpeg_bytes
+                        ):
+                            handle_failure(camera_id, camera, "画面疑似异常（纯色/无信号），尝试自动恢复", state_active)
+                        else:
                             consecutive_failures[camera_id] = 0
+                            last_error_message[camera_id] = ""
+                except Exception as exc:  # noqa: BLE001
+                    handle_failure(camera_id, camera, str(exc), state_active)
             elapsed_seconds = time.monotonic() - started_at
             self._preview_stop_event.wait(max(0.0, interval_seconds - elapsed_seconds))
 
+        while not self._preview_stop_event.is_set():
+            # The preview thread doubles as the self-healing watchdog; it must
+            # survive any unexpected error instead of dying silently.
+            try:
+                tick()
+            except Exception:  # noqa: BLE001
+                self._logger.exception("Preview loop iteration failed")
+                self._preview_stop_event.wait(0.5)
+
     def _try_reconnect_camera(self, camera_id: int, camera: BaseCamera) -> bool:
+        """Reconnect with escalation: worker respawn → PnP device reset."""
+        if self._reconnect_once(camera_id, camera):
+            self._reconnect_failures[camera_id] = 0
+            return True
+        failures = self._reconnect_failures.get(camera_id, 0) + 1
+        self._reconnect_failures[camera_id] = failures
+        if failures >= self._RECONNECT_FAILURES_BEFORE_RESET and self._attempt_device_reset(camera_id):
+            if self._reconnect_once(camera_id, camera):
+                self._reconnect_failures[camera_id] = 0
+                return True
+        return False
+
+    def _reconnect_once(self, camera_id: int, camera: BaseCamera) -> bool:
         label = f"camera{camera_id}"
-        self._logger.warning("Camera %d preview keeps failing; attempting automatic reconnect.", camera_id)
+        self._logger.warning("Camera %d looks unhealthy; attempting automatic reconnect.", camera_id)
         self.event_bus.publish("reconnect", {"device": label, "status": "attempting"})
         try:
             status = camera.reconnect()
@@ -580,6 +788,90 @@ class ExperimentCoordinator:
         self.event_bus.publish("reconnect", {"device": label, "status": "ok"})
         self.event_bus.publish("status", self.status_dict())
         return True
+
+    def _attempt_device_reset(self, camera_id: int) -> bool:
+        """Disable/enable the capture device to clear a wedged driver.
+
+        Requires Windows administrator rights; rate limited so a hardware
+        fault cannot cause a reset loop.
+        """
+        if not self._auto_device_reset or not device_reset.is_windows():
+            return False
+        now = time.monotonic()
+        if (
+            self._last_device_reset_monotonic is not None
+            and now - self._last_device_reset_monotonic < self._DEVICE_RESET_COOLDOWN_SECONDS
+        ):
+            return False
+        self._last_device_reset_monotonic = now
+        if not device_reset.is_admin():
+            self.event_bus.publish(
+                "notice",
+                {"message": "自动复位采集设备需要管理员权限；请以管理员身份运行软件，或手动拔插设备 USB"},
+            )
+            return False
+        name_like = self._pnp_name_like
+        if not name_like:
+            with self._lock:
+                camera_status = self._status.camera if camera_id == 1 else self._status.camera2
+            device_name = (camera_status or {}).get("device_name") if isinstance(camera_status, dict) else ""
+            if device_name:
+                name_like = f"*{device_name}*"
+        if not name_like:
+            self.event_bus.publish(
+                "notice",
+                {"message": "未能确定采集设备名称，无法自动复位（可设置 MRC_CAMERA_PNP_NAME_LIKE）"},
+            )
+            return False
+        devices = device_reset.find_devices(name_like)
+        if not devices:
+            self.event_bus.publish("notice", {"message": f"未找到匹配 {name_like} 的设备，无法自动复位"})
+            return False
+        self._logger.warning("Resetting capture device(s) matching %s.", name_like)
+        self.event_bus.publish("notice", {"message": "正在自动复位采集设备（禁用→重新启用）…"})
+        ok_any = False
+        for device in devices:
+            result = device_reset.reset_device(device["instance_id"])
+            if result.get("ok"):
+                ok_any = True
+            else:
+                self._logger.warning(
+                    "Device reset failed for %s: %s", device["instance_id"], result.get("error")
+                )
+        self.event_bus.publish(
+            "notice",
+            {
+                "message": "采集设备复位完成，正在重新连接…"
+                if ok_any
+                else "采集设备复位失败：请拔插设备 USB；若仍无效请重启电脑"
+            },
+        )
+        return ok_any
+
+    def recover_camera(self, camera_id: int = 1) -> Dict[str, Any]:
+        """One-click recovery for non-expert operators (UI button)."""
+        with self._lock:
+            if self._status.state in self._ACTIVE_STATES:
+                raise RuntimeError("实验进行中无法执行相机修复，请先停止录制。")
+        camera = self.camera if camera_id == 1 else self.camera2
+        if camera is None:
+            raise RuntimeError("目标相机未启用。")
+        self.event_bus.publish("notice", {"message": f"开始修复相机{camera_id}…"})
+        if self._reconnect_once(camera_id, camera):
+            self._finish_camera_recovery(camera_id)
+            return {"ok": True, "step": "reconnect"}
+        # Manual recovery bypasses the automatic-reset cooldown.
+        self._last_device_reset_monotonic = None
+        if self._attempt_device_reset(camera_id) and self._reconnect_once(camera_id, camera):
+            self._finish_camera_recovery(camera_id)
+            return {"ok": True, "step": "device_reset"}
+        raise RuntimeError("自动修复未成功：请拔插采集设备的 USB 后再点一次修复；若仍失败请重启电脑。")
+
+    def _finish_camera_recovery(self, camera_id: int) -> None:
+        self._reconnect_failures[camera_id] = 0
+        with self._lock:
+            self._camera_desired.add(camera_id)
+            self._ensure_preview_worker_locked()
 
     def _attempt_daq_recovery(self) -> None:
         for attempt in range(1, self._DAQ_RECOVERY_ATTEMPTS + 1):
@@ -638,6 +930,20 @@ class ExperimentCoordinator:
         with self._lock:
             self._status.camera = asdict(self.camera.status())
             self._status.camera2 = asdict(self.camera2.status()) if self.camera2 else None
+
+    def _ensure_disk_space(self, root: Path) -> None:
+        min_free_gb = float(os.getenv("MRC_MIN_FREE_DISK_GB", "2"))
+        if min_free_gb <= 0:
+            return
+        try:
+            usage = shutil.disk_usage(root)
+        except OSError:
+            return
+        free_gb = usage.free / (1024 ** 3)
+        if free_gb < min_free_gb:
+            raise RuntimeError(
+                f"磁盘剩余空间不足（{free_gb:.1f} GB，需至少 {min_free_gb:g} GB），请清理磁盘后再开始录制。"
+            )
 
     def _run_tracked(self, command: List[str], timeout: float) -> subprocess.CompletedProcess:
         """Run an external tool while keeping a handle so shutdown can kill it."""
@@ -1196,6 +1502,7 @@ class ExperimentCoordinator:
                 output_video=output_video,
                 start_seconds=max(0.0, float(alignment["preroll_seconds"])) * video_ratio,
                 duration_seconds=float(alignment["window_seconds"]) * video_ratio,
+                video_filter=self._adjust_filter_for_camera(1),
             )
 
         alignment["video_trim"] = trim_result
@@ -1274,6 +1581,7 @@ class ExperimentCoordinator:
             output_video=output_video,
             start_seconds=max(0.0, float(camera2_alignment["preroll_seconds"])) * video_ratio2,
             duration_seconds=window_seconds * video_ratio2,
+            video_filter=self._adjust_filter_for_camera(2),
         )
         if trim_result.get("status") == "ok":
             alignment["files"]["source_video_camera2"] = source_video.name
@@ -1375,6 +1683,7 @@ class ExperimentCoordinator:
         output_video: Path,
         start_seconds: float,
         duration_seconds: float,
+        video_filter: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not self.config.video_trim_enabled:
             return {"status": "disabled", "reason": "MRC_VIDEO_TRIM_ENABLED is false"}
@@ -1397,6 +1706,10 @@ class ExperimentCoordinator:
             }
 
         mode = self.config.video_trim_mode.lower()
+        # Stream copy cannot apply filters; when image adjustments must be
+        # written into the output, force the re-encode path.
+        if video_filter and mode in {"copy", "stream_copy"}:
+            mode = "reencode"
         commands: List[tuple[str, List[str]]] = []
         if mode in {"copy", "stream_copy"}:
             commands.append((
@@ -1416,28 +1729,30 @@ class ExperimentCoordinator:
                 ],
             ))
         else:
-            commands.append((
-                "reencode",
-                [
-                    ffmpeg,
-                    "-y",
-                    "-i",
-                    str(source_video),
-                    "-ss",
-                    f"{start_seconds:.6f}",
-                    "-t",
-                    f"{duration_seconds:.6f}",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-crf",
-                    "18",
-                    "-c:a",
-                    "copy",
-                    str(output_video),
-                ],
-            ))
+            reencode_command = [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(source_video),
+                "-ss",
+                f"{start_seconds:.6f}",
+                "-t",
+                f"{duration_seconds:.6f}",
+            ]
+            if video_filter:
+                reencode_command.extend(["-vf", video_filter])
+            reencode_command.extend([
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "18",
+                "-c:a",
+                "copy",
+                str(output_video),
+            ])
+            commands.append(("reencode", reencode_command))
             commands.append((
                 "copy_fallback",
                 [
@@ -1471,6 +1786,7 @@ class ExperimentCoordinator:
                     "output_file": str(output_video),
                     "start_seconds": start_seconds,
                     "duration_seconds": duration_seconds,
+                    "video_filter": video_filter if label != "copy_fallback" else None,
                     "command": command,
                 }
             errors.append(

@@ -11,6 +11,9 @@ const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 let mainWindow: BrowserWindow | null = null;
 let backendProcess: ChildProcessWithoutNullStreams | null = null;
 let quitInProgress = false;
+let backendStartedAt = 0;
+let backendRestartAttempts = 0;
+const BACKEND_MAX_RESTART_ATTEMPTS = 5;
 
 function appRoot(): string {
   return app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..", "..");
@@ -92,7 +95,27 @@ function startBackend(): void {
   backendProcess.on("exit", (code, signal) => {
     console.log(`[backend] exited code=${code} signal=${signal}`);
     backendProcess = null;
+    if (quitInProgress) {
+      return;
+    }
+    // Unattended-operation resilience: restart a crashed backend, with a
+    // cap so a broken install cannot crash-loop forever.
+    if (Date.now() - backendStartedAt > 60_000) {
+      backendRestartAttempts = 0;
+    }
+    if (backendRestartAttempts >= BACKEND_MAX_RESTART_ATTEMPTS) {
+      console.error("[backend] crashed repeatedly; not restarting again");
+      return;
+    }
+    backendRestartAttempts += 1;
+    console.warn(`[backend] restarting (attempt ${backendRestartAttempts}/${BACKEND_MAX_RESTART_ATTEMPTS})...`);
+    setTimeout(() => {
+      if (!quitInProgress && !backendProcess) {
+        startBackend();
+      }
+    }, 3000);
   });
+  backendStartedAt = Date.now();
 }
 
 function postShutdownFast(timeoutMs: number): Promise<boolean> {
