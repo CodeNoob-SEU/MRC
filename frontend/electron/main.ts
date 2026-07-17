@@ -20,13 +20,45 @@ function appRoot(): string {
 }
 
 let backendConsoleLog: fs.WriteStream | null | undefined;
+let resolvedLogsDir: string | null = null;
+
+function logsDir(): string {
+  if (resolvedLogsDir) {
+    return resolvedLogsDir;
+  }
+  // Keep logs somewhere the operator can actually find: next to the
+  // portable exe, or in the install directory — NOT under the (possibly
+  // different, elevated) user's AppData.
+  const candidates: string[] = [];
+  if (process.env.PORTABLE_EXECUTABLE_DIR) {
+    candidates.push(path.join(process.env.PORTABLE_EXECUTABLE_DIR, "logs"));
+  }
+  if (app.isPackaged) {
+    candidates.push(path.join(path.dirname(app.getPath("exe")), "logs"));
+  } else {
+    candidates.push(path.join(appRoot(), "logs"));
+  }
+  candidates.push(path.join(app.getPath("userData"), "logs"));
+  for (const dir of candidates) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.accessSync(dir, fs.constants.W_OK);
+      resolvedLogsDir = dir;
+      return dir;
+    } catch {
+      continue;
+    }
+  }
+  resolvedLogsDir = path.join(app.getPath("userData"), "logs");
+  return resolvedLogsDir;
+}
 
 function openBackendConsoleLog(): fs.WriteStream | null {
   if (backendConsoleLog !== undefined) {
     return backendConsoleLog;
   }
   try {
-    const dir = path.join(app.getPath("userData"), "logs");
+    const dir = logsDir();
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, "backend-console.log");
     if (fs.existsSync(file) && fs.statSync(file).size > 10 * 1024 * 1024) {
@@ -88,7 +120,7 @@ function startBackend(): void {
         MRC_VENDOR_ARCH: "win32",
         MRC_FAST_BACKEND_SHUTDOWN: "1",
         MRC_OUTPUT_ROOT: path.join(app.getPath("documents"), "MRC Runs"),
-        MRC_LOG_DIR: path.join(app.getPath("userData"), "logs"),
+        MRC_LOG_DIR: logsDir(),
         ...(fs.existsSync(ffmpeg) ? { MRC_FFMPEG: ffmpeg } : {})
       }
     : {};
@@ -275,6 +307,16 @@ app.whenReady().then(() => {
       return null;
     }
     return result.filePaths[0];
+  });
+  ipcMain.handle("open-log-directory", async () => {
+    const dir = logsDir();
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch {
+      /* opened below regardless */
+    }
+    await shell.openPath(dir);
+    return dir;
   });
   process.env.MRC_BACKEND_URL = BACKEND_URL;
   startBackend();

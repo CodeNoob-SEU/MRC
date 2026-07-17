@@ -16,6 +16,8 @@ def _setup_logging() -> None:
     """Console + rotating file logs so field issues can be diagnosed later."""
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     log_dir = Path(os.getenv("MRC_LOG_DIR", str(Path(__file__).resolve().parents[2] / "logs")))
+    # Expose the resolved directory so /config can report it to the UI.
+    os.environ["MRC_LOG_DIR"] = str(log_dir)
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         handlers.append(

@@ -103,6 +103,7 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
             "output_root": str(output_root),
             "hardware_mode": config.hardware_mode,
             "camera2_enabled": config.camera2_enabled,
+            "log_dir": os.getenv("MRC_LOG_DIR", str((repo_root / "logs").resolve())),
         }
 
     @app.get("/devices")

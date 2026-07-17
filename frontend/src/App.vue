@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import {
-  AlertTriangle, FolderOpen, Play, RotateCw, Save, SlidersHorizontal, Square, Wrench
+  AlertTriangle, FileText, FolderOpen, Play, RotateCw, Save, SlidersHorizontal, Square, Wrench
 } from "lucide-vue-next";
 
 /* ----------------------------- Types ----------------------------- */
@@ -377,6 +377,10 @@ async function startManualRecording() {
     busy.value = false;
   }
 }
+const canOpenLogs = Boolean(window.mrc?.openLogDirectory);
+function openLogs() {
+  window.mrc?.openLogDirectory?.().catch(() => {});
+}
 async function recoverCamera(cameraId: number) {
   busy.value = true;
   errorMessage.value = "";
@@ -581,6 +585,9 @@ onUnmounted(() => {
             <i class="dot" :class="connection === 'online' ? 'ok' : 'off'"></i>
             {{ connection === "online" ? "在线" : "离线" }}
           </div>
+          <button v-if="canOpenLogs" class="chip chip-btn" title="打开日志文件夹" @click="openLogs">
+            <FileText :size="13" />日志
+          </button>
         </div>
       </header>
 
