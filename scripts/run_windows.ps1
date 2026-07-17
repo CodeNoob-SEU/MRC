@@ -87,6 +87,7 @@ if ($env:MRC_FFMPEG) {
   Write-Warning "FFmpeg was not found. Aligned trimming and first/last frame extraction will be unavailable."
 }
 
+Write-Host "[1/3] Checking backend port $Port..." -ForegroundColor Cyan
 & "$PSScriptRoot\ensure_backend_port_windows.ps1" -Port $Port
 
 if ($Dev) {
@@ -124,15 +125,18 @@ if (-not $needBuild) {
   }
 }
 if ($needBuild) {
+  Write-Host "[2/3] Building frontend (first run or sources changed; takes a moment)..." -ForegroundColor Yellow
   try {
     Push-Location $frontendDir
-    npm run build
+    npm run build:fast
     if ($LASTEXITCODE -ne 0) {
       throw "Frontend build failed (exit code $LASTEXITCODE)."
     }
   } finally {
     Pop-Location
   }
+} else {
+  Write-Host "[2/3] Frontend build is up to date (skipped)." -ForegroundColor Cyan
 }
 
 $electronExe = Join-Path $frontendDir "node_modules\electron\dist\electron.exe"
@@ -140,5 +144,5 @@ if (!(Test-Path $electronExe)) {
   throw "Electron runtime was not found at $electronExe. Run .\scripts\init_windows.ps1 first."
 }
 $env:MRC_UI_MODE = "dist"
-Write-Host "Fast start (add -Dev for development mode with HMR)" -ForegroundColor Cyan
+Write-Host "[3/3] Launching app (add -Dev for development mode with HMR)..." -ForegroundColor Cyan
 & $electronExe $frontendDir

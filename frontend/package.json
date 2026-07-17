@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "npm run build:electron && concurrently -k \"vite\" \"tsc -p electron/tsconfig.json --watch\" \"wait-on tcp:5173 && electron .\"",
     "build": "vue-tsc --noEmit && vite build && npm run build:electron",
+    "build:fast": "vite build && tsc -p electron/tsconfig.json",
     "build:electron": "tsc -p electron/tsconfig.json",
     "dist:win:x64": "python3 ../scripts/prepare_windows_runtime.py && npm run build && electron-builder --win portable --x64",
     "preview": "vite preview"
