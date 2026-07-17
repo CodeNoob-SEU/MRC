@@ -19,6 +19,27 @@ function appRoot(): string {
   return app.isPackaged ? process.resourcesPath : path.resolve(__dirname, "..", "..");
 }
 
+let backendConsoleLog: fs.WriteStream | null | undefined;
+
+function openBackendConsoleLog(): fs.WriteStream | null {
+  if (backendConsoleLog !== undefined) {
+    return backendConsoleLog;
+  }
+  try {
+    const dir = path.join(app.getPath("userData"), "logs");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "backend-console.log");
+    if (fs.existsSync(file) && fs.statSync(file).size > 10 * 1024 * 1024) {
+      fs.rmSync(file);
+    }
+    backendConsoleLog = fs.createWriteStream(file, { flags: "a" });
+  } catch (error) {
+    console.warn(`[backend] console log unavailable: ${String(error)}`);
+    backendConsoleLog = null;
+  }
+  return backendConsoleLog;
+}
+
 function clearBackendPort(): boolean {
   if (process.env.MRC_SKIP_PORT_CLEANUP === "1" || process.platform !== "win32") {
     return true;
@@ -79,15 +100,23 @@ function startBackend(): void {
       ...process.env,
       PYTHONPATH: backendDir,
       PYTHONUTF8: "1",
+      PYTHONFAULTHANDLER: "1",
       MRC_BACKEND_PORT: BACKEND_PORT
     }
   });
 
+  // Mirror the backend's console output (including crash tracebacks on
+  // stderr, which the backend's own file logger cannot capture) to a file
+  // so packaged-app failures are diagnosable in the field.
+  const consoleLog = openBackendConsoleLog();
+  consoleLog?.write(`\n===== backend started ${new Date().toISOString()} (pid ${backendProcess.pid}) =====\n`);
   backendProcess.stdout.on("data", (data) => {
     console.log(`[backend] ${data.toString().trim()}`);
+    consoleLog?.write(data);
   });
   backendProcess.stderr.on("data", (data) => {
     console.error(`[backend] ${data.toString().trim()}`);
+    consoleLog?.write(data);
   });
   backendProcess.on("error", (error) => {
     console.error(`[backend] failed to start: ${String(error)}`);
@@ -95,6 +124,7 @@ function startBackend(): void {
   });
   backendProcess.on("exit", (code, signal) => {
     console.log(`[backend] exited code=${code} signal=${signal}`);
+    openBackendConsoleLog()?.write(`===== backend exited ${new Date().toISOString()} code=${code} signal=${signal} =====\n`);
     backendProcess = null;
     if (quitInProgress) {
       return;
