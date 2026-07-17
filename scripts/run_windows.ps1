@@ -39,7 +39,7 @@ $env:MRC_FAST_BACKEND_SHUTDOWN = if ($env:MRC_FAST_BACKEND_SHUTDOWN) { $env:MRC_
 if ($Mode -eq "real") {
   $env:MRC_VENDOR_ARCH = "win32"
   $env:MRC_CAMERA_DEVICE_INDEX = [string]$CameraDeviceIndex
-  $env:MRC_CAMERA2_ENABLED = if ($EnableCamera2) { "1" } else { "0" }
+  $env:MRC_CAMERA2_ENABLED = if ($EnableCamera2) { "1" } elseif ($env:MRC_CAMERA2_ENABLED) { $env:MRC_CAMERA2_ENABLED } else { "auto" }
   $env:MRC_CAMERA2_DEVICE_INDEX = [string]$Camera2DeviceIndex
   $env:MRC_DAQ_DEVICE_INDEX = [string]$DaqDeviceIndex
   $env:MRC_CAMERA_VIDEO_SOURCE_INDEX = [string]$VideoSourceIndex

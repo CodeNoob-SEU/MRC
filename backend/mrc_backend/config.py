@@ -52,6 +52,9 @@ class AppConfig:
     video_trim_mode: str = "reencode"
     ffmpeg_path: str = ""
     camera2_enabled: bool = False
+    # When true, camera 2 is enabled automatically at initialize time if the
+    # SDK reports two or more capture devices.
+    camera2_auto: bool = False
     camera: CameraConfig = field(default_factory=CameraConfig)
     camera2: CameraConfig = field(default_factory=CameraConfig)
     daq: DaqConfig = field(default_factory=DaqConfig)
@@ -87,7 +90,16 @@ class AppConfig:
             os.getenv("MRC_CAMERA2_DEVICE_INDEX", str(config.camera.device_index + 1))
         )
         config.camera2 = _camera_from_env(config.camera2, "MRC_CAMERA2")
-        config.camera2_enabled = _env_bool("MRC_CAMERA2_ENABLED", config.camera2_enabled)
+        camera2_raw = os.getenv("MRC_CAMERA2_ENABLED", "auto").strip().lower()
+        if camera2_raw in {"1", "true", "yes", "on"}:
+            config.camera2_enabled = True
+            config.camera2_auto = False
+        elif camera2_raw in {"0", "false", "no", "off"}:
+            config.camera2_enabled = False
+            config.camera2_auto = False
+        else:  # "auto" or anything else: detect at initialize time
+            config.camera2_enabled = False
+            config.camera2_auto = True
         config.daq.device_index = int(os.getenv("MRC_DAQ_DEVICE_INDEX", str(config.daq.device_index)))
         config.camera.dxmedia_dll = os.getenv("MRC_DXMEDIA_DLL", config.camera.dxmedia_dll)
         config.camera2.dxmedia_dll = os.getenv(

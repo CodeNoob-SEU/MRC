@@ -160,6 +160,8 @@ class ExperimentCoordinator:
             except Exception as exc:  # noqa: BLE001
                 self._status.camera = asdict(self.camera.status())
                 errors.append(f"camera1: {exc}")
+            if camera_ok and self.camera2 is None and self.config.camera2_auto:
+                self._maybe_enable_second_camera_locked()
             if self.camera2 is not None:
                 try:
                     self._status.camera2 = asdict(self.camera2.initialize())
@@ -190,6 +192,34 @@ class ExperimentCoordinator:
         if errors and not camera_ok and not daq_ok:
             raise RuntimeError("; ".join(errors))
         return self.status()
+
+    def _maybe_enable_second_camera_locked(self) -> None:
+        """Auto-enable camera 2 when the SDK reports two or more devices."""
+        camera_status = self._status.camera or {}
+        try:
+            device_count = int(camera_status.get("device_count") or 0)
+        except (TypeError, ValueError):
+            device_count = 0
+        if device_count < 2:
+            return
+        if self.config.camera2.device_index == self.config.camera.device_index:
+            self.config.camera2.device_index = self.config.camera.device_index + 1
+        camera2 = build_camera(self.config.hardware_mode, self.config.camera2, self.repo_root)
+        try:
+            status2 = camera2.initialize()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("Detected %d capture devices but enabling camera 2 failed: %s", device_count, exc)
+            try:
+                camera2.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        self.camera2 = camera2
+        self.config.camera2_enabled = True
+        self._camera_desired.add(2)
+        self._status.camera2 = asdict(status2)
+        self._logger.info("Detected %d capture devices; camera 2 enabled automatically.", device_count)
+        self.event_bus.publish("notice", {"message": "检测到第二台相机，已自动启用"})
 
     def devices(self) -> Dict[str, Any]:
         with self._lock:
