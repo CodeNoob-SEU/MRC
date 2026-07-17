@@ -33,7 +33,7 @@ function clearBackendPort(): boolean {
     execFileSync(
       "powershell.exe",
       ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "-Port", BACKEND_PORT],
-      { cwd: repoRoot, stdio: "inherit" }
+      { cwd: repoRoot, stdio: "ignore", windowsHide: true, timeout: 30000 }
     );
     return true;
   } catch (error) {

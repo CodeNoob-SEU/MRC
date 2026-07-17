@@ -38,8 +38,12 @@ def main() -> None:
             source.extractall(runtime_dir)
 
     pth_file = runtime_dir / "python310._pth"
+    # A ._pth file makes the embedded Python IGNORE PYTHONPATH, so the
+    # backend package path must be listed here explicitly. In the packaged
+    # app this runtime lives at resources/python and the backend at
+    # resources/backend.
     pth_file.write_text(
-        "python310.zip\n.\nLib\\site-packages\nimport site\n",
+        "python310.zip\n.\nLib\\site-packages\n..\\backend\nimport site\n",
         encoding="utf-8",
     )
     site_packages.mkdir(parents=True)
