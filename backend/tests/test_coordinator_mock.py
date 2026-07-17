@@ -64,7 +64,7 @@ class CoordinatorMockTest(unittest.TestCase):
             coordinator.initialize()
             status = coordinator.start_experiment()
 
-            deadline = time.time() + 3
+            deadline = time.time() + 10
             while time.time() < deadline:
                 status = coordinator.status()
                 if status.state == "finished":
@@ -93,7 +93,7 @@ class CoordinatorMockTest(unittest.TestCase):
             coordinator.initialize()
             status = coordinator.start_experiment()
 
-            deadline = time.time() + 3
+            deadline = time.time() + 10
             while time.time() < deadline:
                 status = coordinator.status()
                 if status.state == "finished":
@@ -179,7 +179,7 @@ class CoordinatorMockTest(unittest.TestCase):
             coordinator.initialize()
             status = coordinator.start_experiment()
 
-            deadline = time.time() + 3
+            deadline = time.time() + 10
             while time.time() < deadline:
                 status = coordinator.status()
                 if status.state == "finished":

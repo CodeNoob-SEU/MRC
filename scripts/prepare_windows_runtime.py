@@ -46,11 +46,14 @@ def main() -> None:
 
     source_requirements = repo_root / "backend" / "requirements.txt"
     runtime_requirements = runtime_dir / "requirements.txt"
+    # uvicorn[standard] pulls compiled extras that lack win32 wheels; plain
+    # uvicorn works but needs an explicit websocket library or /ws breaks.
     runtime_requirements.write_text(
         source_requirements.read_text(encoding="utf-8").replace(
             "uvicorn[standard]",
             "uvicorn",
-        ),
+        )
+        + "websockets>=12,<15\n",
         encoding="utf-8",
     )
     run(

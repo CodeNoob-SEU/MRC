@@ -67,6 +67,7 @@ function startBackend(): void {
         MRC_VENDOR_ARCH: "win32",
         MRC_FAST_BACKEND_SHUTDOWN: "1",
         MRC_OUTPUT_ROOT: path.join(app.getPath("documents"), "MRC Runs"),
+        MRC_LOG_DIR: path.join(app.getPath("userData"), "logs"),
         ...(fs.existsSync(ffmpeg) ? { MRC_FFMPEG: ffmpeg } : {})
       }
     : {};

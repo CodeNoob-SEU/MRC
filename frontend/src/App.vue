@@ -528,6 +528,13 @@ onMounted(() => {
   applyScale();
   window.addEventListener("resize", applyScale);
   refreshStatus().catch(() => { connection.value = "offline"; });
+  // Adopt the backend's configured output root (packaged builds point it at
+  // the user's Documents folder) unless the operator already changed it.
+  api("/config")
+    .then((cfg) => {
+      if (outputRoot.value === "runs" && cfg?.output_root) outputRoot.value = String(cfg.output_root);
+    })
+    .catch(() => {});
   connectSocket();
 });
 onUnmounted(() => {

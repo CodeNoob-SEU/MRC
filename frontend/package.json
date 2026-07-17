@@ -30,7 +30,8 @@
     "productName": "MRC Integrated Acquisition",
     "asar": true,
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "assets"
     },
     "files": [
       "dist/**/*",
@@ -75,13 +76,28 @@
     "win": {
       "target": [
         {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
           "target": "portable",
           "arch": [
             "x64"
           ]
         }
       ],
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "requireAdministrator",
       "artifactName": "MRC-Integrated-Acquisition-${version}-Windows-x64.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "artifactName": "MRC-Integrated-Acquisition-Setup-${version}.${ext}"
     }
   }
 }

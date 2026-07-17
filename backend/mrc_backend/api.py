@@ -94,6 +94,17 @@ def create_app(config: Optional[AppConfig] = None, repo_root: Optional[Path] = N
     def status() -> Dict[str, Any]:
         return coordinator.status_dict()
 
+    @app.get("/config")
+    def get_config() -> Dict[str, Any]:
+        output_root = Path(config.output_root)
+        if not output_root.is_absolute():
+            output_root = (repo_root / output_root).resolve()
+        return {
+            "output_root": str(output_root),
+            "hardware_mode": config.hardware_mode,
+            "camera2_enabled": config.camera2_enabled,
+        }
+
     @app.get("/devices")
     def devices() -> Dict[str, Any]:
         return coordinator.devices()
