@@ -9,7 +9,9 @@ param(
   [int]$VideoSourceIndex = 0,
   [int]$VideoSourceIndex2 = -1,
   [ValidateSet("mp4", "avi")]
-  [string]$CaptureFormat = "mp4"
+  [string]$CaptureFormat = "mp4",
+  [switch]$Dev,
+  [switch]$Rebuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -87,9 +89,56 @@ if ($env:MRC_FFMPEG) {
 
 & "$PSScriptRoot\ensure_backend_port_windows.ps1" -Port $Port
 
-try {
-  Push-Location $frontendDir
-  npm run dev
-} finally {
-  Pop-Location
+if ($Dev) {
+  # Development mode: vite dev server + tsc watch + HMR (slow startup).
+  try {
+    Push-Location $frontendDir
+    npm run dev
+  } finally {
+    Pop-Location
+  }
+  return
 }
+
+# Fast start (default): run the built renderer directly. Rebuild only when
+# no build exists, -Rebuild was given, or sources are newer than the build.
+$distIndex = Join-Path $frontendDir "dist\index.html"
+$distMain = Join-Path $frontendDir "dist-electron\main.js"
+$needBuild = $Rebuild -or !(Test-Path $distIndex) -or !(Test-Path $distMain)
+if (-not $needBuild) {
+  $sourcePaths = @(
+    (Join-Path $frontendDir "src"),
+    (Join-Path $frontendDir "electron"),
+    (Join-Path $frontendDir "index.html"),
+    (Join-Path $frontendDir "vite.config.ts"),
+    (Join-Path $frontendDir "package.json")
+  )
+  $newestSource = Get-ChildItem -Path $sourcePaths -Recurse -File -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  $builtIndex = (Get-Item $distIndex).LastWriteTime
+  $builtMain = (Get-Item $distMain).LastWriteTime
+  $builtTime = if ($builtIndex -lt $builtMain) { $builtIndex } else { $builtMain }
+  if ($newestSource -and $newestSource.LastWriteTime -gt $builtTime) {
+    Write-Host "Frontend sources changed; rebuilding once..." -ForegroundColor Yellow
+    $needBuild = $true
+  }
+}
+if ($needBuild) {
+  try {
+    Push-Location $frontendDir
+    npm run build
+    if ($LASTEXITCODE -ne 0) {
+      throw "Frontend build failed (exit code $LASTEXITCODE)."
+    }
+  } finally {
+    Pop-Location
+  }
+}
+
+$electronExe = Join-Path $frontendDir "node_modules\electron\dist\electron.exe"
+if (!(Test-Path $electronExe)) {
+  throw "Electron runtime was not found at $electronExe. Run .\scripts\init_windows.ps1 first."
+}
+$env:MRC_UI_MODE = "dist"
+Write-Host "Fast start (add -Dev for development mode with HMR)" -ForegroundColor Cyan
+& $electronExe $frontendDir
