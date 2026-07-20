@@ -5,8 +5,26 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
+
+
+def _download(url: str, dest: Path, attempts: int = 5) -> None:
+    """urlretrieve with retries: gyan.dev/python.org occasionally 503, and an
+    un-retried download failure was silently killing the Windows exe build."""
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            print(f"Downloading {url} (attempt {attempt}/{attempts})")
+            urllib.request.urlretrieve(url, dest)
+            return
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            print(f"  download failed: {exc}")
+            if attempt < attempts:
+                time.sleep(min(30, 3 * attempt))
+    raise RuntimeError(f"Failed to download {url} after {attempts} attempts: {last}")
 
 
 PYTHON_VERSION = "3.10.11"
@@ -32,8 +50,7 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="mrc-python-win32-") as temporary:
         archive = Path(temporary) / "python-embed-win32.zip"
-        print(f"Downloading {PYTHON_URL}")
-        urllib.request.urlretrieve(PYTHON_URL, archive)
+        _download(PYTHON_URL, archive)
         with zipfile.ZipFile(archive) as source:
             source.extractall(runtime_dir)
 
@@ -93,8 +110,7 @@ def main() -> None:
         archive = download_dir / "ffmpeg-release-essentials.zip"
         download_dir.mkdir(parents=True, exist_ok=True)
         if not archive.exists():
-            print(f"Downloading {FFMPEG_URL}")
-            urllib.request.urlretrieve(FFMPEG_URL, archive)
+            _download(FFMPEG_URL, archive)
         with tempfile.TemporaryDirectory(prefix="mrc-ffmpeg-win64-") as temporary:
             with zipfile.ZipFile(archive) as source:
                 source.extractall(temporary)

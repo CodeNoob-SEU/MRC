@@ -115,6 +115,15 @@ jobs:
       - name: Prepare bundled backend runtime (win32 Python + deps + ffmpeg)
         run: python scripts/prepare_windows_runtime.py
 
+      - name: Smoke test bundled backend runtime
+        env:
+          MRC_HARDWARE_MODE: mock
+        run: |
+          # Run the ACTUAL bundled 32-bit Python against the backend so a broken
+          # runtime (missing deps / bad ._pth) fails the build instead of
+          # shipping an exe whose backend never starts.
+          frontend\build\python-win32\python.exe -c "import sys; sys.path.insert(0, 'backend'); from mrc_backend.api import create_app; create_app(); print('bundled backend import OK')"
+
       - name: Build frontend
         working-directory: frontend
         run: |
