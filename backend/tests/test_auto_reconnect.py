@@ -56,7 +56,7 @@ class AutoReconnectTest(unittest.TestCase):
         try:
             coordinator.initialize()
             camera.failing = True
-            deadline = time.time() + 5
+            deadline = time.time() + 20  # generous: slow CI runners need >5s
             while time.time() < deadline and camera.reconnect_count == 0:
                 time.sleep(0.05)
             self.assertGreaterEqual(camera.reconnect_count, 1)

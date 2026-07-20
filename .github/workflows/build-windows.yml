@@ -6,6 +6,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -94,6 +97,12 @@ jobs:
           path: MRC-windows-${{ matrix.arch }}.zip
           compression-level: 0
 
+      - name: Publish portable zip to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MRC-windows-${{ matrix.arch }}.zip
+
   installer:
     runs-on: windows-latest
     defaults:
@@ -148,3 +157,9 @@ jobs:
           name: MRC-windows-exe
           path: frontend/release/*.exe
           compression-level: 0
+
+      - name: Publish exe to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: frontend/release/*.exe
