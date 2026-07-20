@@ -116,13 +116,18 @@ jobs:
         run: python scripts/prepare_windows_runtime.py
 
       - name: Smoke test bundled backend runtime
+        # Set the same env the packaged Electron app (main.ts packagedDefaults)
+        # gives the backend, so we verify the exe resolves to the SAME config as
+        # the source-run bat (scripts/run_windows.ps1): self-built capture + the
+        # win32 vendor DLL. Also proves the bundled 32-bit Python can construct
+        # the app (missing deps / bad ._pth would fail the build here instead of
+        # shipping an exe whose backend never starts).
         env:
-          MRC_HARDWARE_MODE: mock
+          MRC_HARDWARE_MODE: real
+          MRC_VENDOR_ARCH: win32
+          MRC_CAMERA_CAPTURE_MODE: selfbuilt
         run: |
-          # Run the ACTUAL bundled 32-bit Python against the backend so a broken
-          # runtime (missing deps / bad ._pth) fails the build instead of
-          # shipping an exe whose backend never starts.
-          frontend\build\python-win32\python.exe -c "import sys; sys.path.insert(0, 'backend'); from mrc_backend.api import create_app; create_app(); print('bundled backend import OK')"
+          frontend\build\python-win32\python.exe -c "import sys, os; sys.path.insert(0, 'backend'); from mrc_backend.config import AppConfig; c = AppConfig.from_env(); assert c.camera.capture_mode == 'selfbuilt', c.camera.capture_mode; assert 'win32' in c.camera.dxmedia_dll, c.camera.dxmedia_dll; os.environ['MRC_HARDWARE_MODE'] = 'mock'; from mrc_backend.api import create_app; create_app(); print('bundled backend OK; capture_mode =', c.camera.capture_mode, '| dll =', c.camera.dxmedia_dll)"
 
       - name: Build frontend
         working-directory: frontend
