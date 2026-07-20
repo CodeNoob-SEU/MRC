@@ -69,12 +69,17 @@ def main() -> None:
     runtime_requirements = runtime_dir / "requirements.txt"
     # uvicorn[standard] pulls compiled extras that lack win32 wheels; plain
     # uvicorn works but needs an explicit websocket library or /ws breaks.
+    # anyio requires the exceptiongroup backport on Python < 3.11 (the bundled
+    # runtime is 3.10). Cross-installing with --python-version evaluated that
+    # environment marker against the build interpreter (3.12) and dropped it, so
+    # the packaged backend crashed on `import fastapi`. Force it in explicitly.
     runtime_requirements.write_text(
         source_requirements.read_text(encoding="utf-8").replace(
             "uvicorn[standard]",
             "uvicorn",
         )
-        + "websockets>=12,<15\n",
+        + "websockets>=12,<15\n"
+        + "exceptiongroup>=1.2\n",
         encoding="utf-8",
     )
     run(
