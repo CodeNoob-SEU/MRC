@@ -21,6 +21,15 @@ class CameraConfig:
     preview_mode: int = 2
     preview_fps: float = 0.0
     dxmedia_dll: str = "vendor/camera/x64/DXMediaCap.dll"
+    # Capture pipeline:
+    #   "dll"       - vendor DXStartCapture: the DLL encodes+writes a CFR mp4;
+    #                 dropped frames are silent and the timeline drifts.
+    #   "selfbuilt" - raw-frame callback -> our own ffmpeg encoder, recording an
+    #                 exact monotonic timestamp per written frame (frame_times.csv)
+    #                 so alignment maps DAQ triggers to the real frame with no
+    #                 interpolation. Fails safe: falls back to "dll" on any error.
+    # ("selfbuilt" is video-only; the DLL's audio path is not used.)
+    capture_mode: str = "dll"
 
 
 @dataclass
@@ -140,5 +149,6 @@ def _camera_from_env(camera: CameraConfig, prefix: str) -> CameraConfig:
     camera.preview_mode = int(os.getenv(f"{prefix}_PREVIEW_MODE", str(camera.preview_mode)))
     camera.preview_fps = float(os.getenv(f"{prefix}_PREVIEW_FPS", str(camera.preview_fps)))
     camera.save_audio = _env_bool(f"{prefix}_SAVE_AUDIO", camera.save_audio)
+    camera.capture_mode = os.getenv(f"{prefix}_CAPTURE_MODE", camera.capture_mode).strip().lower()
     camera.dxmedia_dll = os.getenv(f"{prefix}_DXMEDIA_DLL", camera.dxmedia_dll)
     return camera

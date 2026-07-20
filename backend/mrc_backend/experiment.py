@@ -4,6 +4,7 @@ from contextlib import closing
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
+import bisect
 import csv
 import json
 import logging
@@ -125,6 +126,11 @@ class ExperimentCoordinator:
         # A uniform frame (e.g. all-green) compresses to a tiny JPEG; treat
         # persistently tiny previews as a fault. 0 disables the check.
         self._preview_min_jpeg_bytes = int(os.getenv("MRC_PREVIEW_MIN_JPEG_BYTES", "4096"))
+        # When the capture card loses signal after a hot-plug, the vendor DLL
+        # keeps returning the last (frozen) frame without error. A live analog
+        # feed always has sensor noise, so byte-identical previews for this many
+        # seconds mean the feed is frozen -> trigger the recovery ladder. 0 off.
+        self._preview_frozen_seconds = float(os.getenv("MRC_PREVIEW_FROZEN_SECONDS", "3.0"))
         self._status = ExperimentStatus(
             camera=asdict(self.camera.status()),
             camera2=asdict(self.camera2.status()) if self.camera2 else None,
@@ -135,9 +141,11 @@ class ExperimentCoordinator:
     _ACTIVE_STATES = {"armed", "recording", "finalizing", "manual_recording"}
     _RECONNECT_FAILURE_THRESHOLD = 10
     _RECONNECT_COOLDOWN_SECONDS = 10.0
+    # Give up auto-recovery after this many attempts without the picture coming
+    # back (e.g. no video on the input), instead of churning device resets.
+    _MAX_RECOVERY_ATTEMPTS = 5
     _DAQ_RECOVERY_ATTEMPTS = 3
     _DAQ_RECOVERY_WAIT_SECONDS = 2.0
-    _RECONNECT_FAILURES_BEFORE_RESET = 2
     _DEVICE_RESET_COOLDOWN_SECONDS = 300.0
 
     def initialize(self) -> ExperimentStatus:
@@ -715,6 +723,10 @@ class ExperimentCoordinator:
         last_error_at: Dict[int, float] = {}
         consecutive_failures: Dict[int, int] = {}
         last_reconnect_at: Dict[int, float] = {}
+        last_frame: Dict[int, str] = {}
+        last_frame_change_at: Dict[int, float] = {}
+        recovery_attempts: Dict[int, int] = {}
+        gave_up: Dict[int, bool] = {}
 
         def handle_failure(camera_id: int, camera: BaseCamera, message: str, state_active: bool) -> None:
             now = time.monotonic()
@@ -733,7 +745,21 @@ class ExperimentCoordinator:
                 >= self._RECONNECT_COOLDOWN_SECONDS
                 and not self._preview_stop_event.is_set()
             ):
+                if recovery_attempts.get(camera_id, 0) >= self._MAX_RECOVERY_ATTEMPTS:
+                    # Recovery keeps not restoring the picture (e.g. there is no
+                    # real video on the input — reconnecting/resetting cannot
+                    # conjure a signal that is not there). Stop churning device
+                    # resets and just alert; resume automatically once a good
+                    # frame returns.
+                    if not gave_up.get(camera_id):
+                        gave_up[camera_id] = True
+                        self.event_bus.publish(
+                            "notice",
+                            {"message": f"相机{camera_id}持续无有效画面，已暂停自动恢复；请检查视频输入线缆/电源或采集卡（画面恢复后自动继续）"},
+                        )
+                    return
                 last_reconnect_at[camera_id] = now
+                recovery_attempts[camera_id] = recovery_attempts.get(camera_id, 0) + 1
                 if self._try_reconnect_camera(camera_id, camera):
                     consecutive_failures[camera_id] = 0
 
@@ -763,15 +789,47 @@ class ExperimentCoordinator:
                         # to a tiny JPEG; treat that as a fault so the
                         # reconnect/device-reset ladder can recover it.
                         approx_bytes = int(len(frame) * 0.75)
+                        now_frame = time.monotonic()
+                        if frame != last_frame.get(camera_id):
+                            last_frame[camera_id] = frame
+                            last_frame_change_at[camera_id] = now_frame
+                        frozen_for = now_frame - last_frame_change_at.get(camera_id, now_frame)
                         if (
                             self._preview_min_jpeg_bytes > 0
                             and frame.startswith("data:image/jpeg")
                             and approx_bytes < self._preview_min_jpeg_bytes
                         ):
                             handle_failure(camera_id, camera, "画面疑似异常（纯色/无信号），尝试自动恢复", state_active)
+                        elif (
+                            self._preview_frozen_seconds > 0
+                            and camera_status.mode != "mock"
+                            and frozen_for >= self._preview_frozen_seconds
+                        ):
+                            # Signal lost after a hot-plug: DLL returns the last
+                            # frozen frame with no error and normal size, so the
+                            # checks above miss it. Byte-identical previews for
+                            # several seconds only happen when the feed is dead.
+                            handle_failure(
+                                camera_id,
+                                camera,
+                                "画面静止/冻结（疑似信号丢失或采集卡异常），尝试自动恢复",
+                                state_active,
+                            )
                         else:
+                            # A good frame means the camera is genuinely healthy.
+                            # Reset counters and clear the reset cooldown so an
+                            # independent later fault can be reset immediately;
+                            # a persistent green screen never reaches here, so it
+                            # can never churn resets.
                             consecutive_failures[camera_id] = 0
                             last_error_message[camera_id] = ""
+                            recovery_attempts[camera_id] = 0
+                            self._last_device_reset_monotonic = None
+                            if gave_up.get(camera_id):
+                                gave_up[camera_id] = False
+                                self.event_bus.publish(
+                                    "notice", {"message": f"相机{camera_id}画面已恢复"}
+                                )
                 except Exception as exc:  # noqa: BLE001
                     handle_failure(camera_id, camera, str(exc), state_active)
             elapsed_seconds = time.monotonic() - started_at
@@ -787,16 +845,19 @@ class ExperimentCoordinator:
                 self._preview_stop_event.wait(0.5)
 
     def _try_reconnect_camera(self, camera_id: int, camera: BaseCamera) -> bool:
-        """Reconnect with escalation: worker respawn → PnP device reset."""
+        """Recover a wedged capture card: PnP device reset FIRST, then reconnect.
+
+        When this hardware is hot-plugged its driver wedges and the worker
+        becomes un-terminable, so a plain reconnect is guaranteed to fail. Reset
+        the device up front to unblock the driver, then reconnect once. The
+        reset is best-effort (no-op if not admin / device not found / on
+        cooldown), in which case the reconnect is still attempted as a fallback.
+        """
+        self._attempt_device_reset(camera_id)
         if self._reconnect_once(camera_id, camera):
             self._reconnect_failures[camera_id] = 0
             return True
-        failures = self._reconnect_failures.get(camera_id, 0) + 1
-        self._reconnect_failures[camera_id] = failures
-        if failures >= self._RECONNECT_FAILURES_BEFORE_RESET and self._attempt_device_reset(camera_id):
-            if self._reconnect_once(camera_id, camera):
-                self._reconnect_failures[camera_id] = 0
-                return True
+        self._reconnect_failures[camera_id] = self._reconnect_failures.get(camera_id, 0) + 1
         return False
 
     def _reconnect_once(self, camera_id: int, camera: BaseCamera) -> bool:
@@ -833,7 +894,6 @@ class ExperimentCoordinator:
             and now - self._last_device_reset_monotonic < self._DEVICE_RESET_COOLDOWN_SECONDS
         ):
             return False
-        self._last_device_reset_monotonic = now
         if not device_reset.is_admin():
             self.event_bus.publish(
                 "notice",
@@ -846,7 +906,9 @@ class ExperimentCoordinator:
                 camera_status = self._status.camera if camera_id == 1 else self._status.camera2
             device_name = (camera_status or {}).get("device_name") if isinstance(camera_status, dict) else ""
             if device_name:
-                name_like = f"*{device_name}*"
+                # DirectShow appends an instance suffix (e.g. " 0#") the PnP
+                # FriendlyName lacks; normalize so the match succeeds.
+                name_like = device_reset.pnp_pattern_from_device_name(device_name)
         if not name_like:
             self.event_bus.publish(
                 "notice",
@@ -857,6 +919,9 @@ class ExperimentCoordinator:
         if not devices:
             self.event_bus.publish("notice", {"message": f"未找到匹配 {name_like} 的设备，无法自动复位"})
             return False
+        # Only start the cooldown once we actually perform a reset, so an early
+        # failure (no match / not admin) does not block retries for 5 minutes.
+        self._last_device_reset_monotonic = now
         self._logger.warning("Resetting capture device(s) matching %s.", name_like)
         self.event_bus.publish("notice", {"message": "正在自动复位采集设备（禁用→重新启用）…"})
         ok_any = False
@@ -887,12 +952,11 @@ class ExperimentCoordinator:
         if camera is None:
             raise RuntimeError("目标相机未启用。")
         self.event_bus.publish("notice", {"message": f"开始修复相机{camera_id}…"})
-        if self._reconnect_once(camera_id, camera):
-            self._finish_camera_recovery(camera_id)
-            return {"ok": True, "step": "reconnect"}
-        # Manual recovery bypasses the automatic-reset cooldown.
+        # Wedged-driver hardware: reset the device first (bypassing the cooldown),
+        # then reconnect. A plain reconnect first would just fail.
         self._last_device_reset_monotonic = None
-        if self._attempt_device_reset(camera_id) and self._reconnect_once(camera_id, camera):
+        self._attempt_device_reset(camera_id)
+        if self._reconnect_once(camera_id, camera):
             self._finish_camera_recovery(camera_id)
             return {"ok": True, "step": "device_reset"}
         raise RuntimeError("自动修复未成功：请拔插采集设备的 USB 后再点一次修复；若仍失败请重启电脑。")
@@ -1409,8 +1473,108 @@ class ExperimentCoordinator:
             "measured_fps (container frames vs wall clock, linear model); not hardware exposure sync"
         )
 
+    def _frame_times_path(self, output_dir: Path, source_video_name: str) -> Path:
+        return output_dir / f"{Path(source_video_name).stem}_frame_times.csv"
+
+    def _load_frame_time_seconds(
+        self, output_dir: Path, alignment: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        source_video = alignment.get("files", {}).get("source_video", "mrc_recording.mp4")
+        return self._load_frame_time_seconds_for(output_dir, source_video)
+
+    def _load_frame_time_seconds_for(
+        self, output_dir: Path, source_video_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """Load real per-frame capture times from ``<source>_frame_times.csv``.
+
+        Returns ``{"seconds": [...], "source": ...}`` where ``seconds[k]`` is the
+        capture time (arbitrary but consistent epoch) of raw video frame ``k+1``
+        (1-based), or ``None`` when no usable table exists -> caller falls back
+        to the effective_fps model. Works for either camera (different source
+        video name). Prefers the high-resolution capture clock; falls back to
+        the monotonic / encode-time stamps.
+        """
+        path = self._frame_times_path(output_dir, source_video_name)
+        if not path.exists():
+            return None
+        capture_ns: List[float] = []
+        mono_ns: List[float] = []
+        enc_ms: List[float] = []
+        try:
+            with path.open("r", newline="", encoding="utf-8") as csv_file:
+                for row in csv.DictReader(csv_file):
+                    if row.get("capture_ns"):
+                        capture_ns.append(float(row["capture_ns"]))
+                    if row.get("monotonic_ns"):
+                        mono_ns.append(float(row["monotonic_ns"]))
+                    if row.get("enc_timestamp_ms"):
+                        enc_ms.append(float(row["enc_timestamp_ms"]))
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("Reading %s failed: %s", path.name, exc)
+            return None
+
+        def _monotonic_seconds(values: List[float], scale: float) -> Optional[List[float]]:
+            if len(values) < 2:
+                return None
+            secs = [v * scale for v in values]
+            if secs[-1] - secs[0] <= 0:
+                return None
+            for earlier, later in zip(secs, secs[1:]):
+                if later < earlier - 1e-6:  # a reset/rollover -> not usable
+                    return None
+            return secs
+
+        # Prefer the high-resolution capture clock (self-built pipeline); every
+        # candidate is a real-time clock, and alignment uses times relative to
+        # the t0 frame, so any consistent source works.
+        for values, scale, name in (
+            (capture_ns, 1e-9, "capture_ns"),
+            (mono_ns, 1e-9, "monotonic_ns"),
+            (enc_ms, 1e-3, "enc_timestamp_ms"),
+        ):
+            seconds = _monotonic_seconds(values, scale)
+            if seconds is not None:
+                return {"seconds": seconds, "source": name, "path": path}
+        return None
+
+    def _make_timestamp_mapper(
+        self, seconds: List[float], usable_start: int
+    ) -> Optional[Any]:
+        """Map a trigger's rel_seconds (from t0) to (frame_from_t0, video_frame).
+
+        Anchored on the existing t0 frame (usable_start); every other frame is
+        located by its *real* capture time, so a burst of dropped frames no
+        longer drifts the mapping. Returns ``None`` when the t0 frame is not
+        covered by the table.
+        """
+        frame_count = len(seconds)
+        ref0 = usable_start - 1  # t0 frame as a 0-based index into the table
+        if ref0 < 0 or ref0 >= frame_count:
+            return None
+        ref_time = seconds[ref0]
+        rel = [value - ref_time for value in seconds]  # rel[ref0] == 0.0, non-decreasing
+
+        def mapper(rel_seconds: float) -> tuple[int, int]:
+            pos = bisect.bisect_left(rel, rel_seconds)
+            if pos <= 0:
+                best = 0
+            elif pos >= frame_count:
+                best = frame_count - 1
+            else:
+                best = pos - 1 if (rel_seconds - rel[pos - 1]) <= (rel[pos] - rel_seconds) else pos
+            video_frame_index = best + 1  # 1-based raw video frame
+            frame_index_from_t0 = video_frame_index - usable_start + 1
+            return frame_index_from_t0, video_frame_index
+
+        return mapper
+
     def _rewrite_trigger_frames(self, output_dir: Path, alignment: Dict[str, Any]) -> None:
-        """Recompute trigger->frame mapping with the measured fps."""
+        """Recompute trigger->frame mapping from real per-frame timestamps.
+
+        When frame_times.csv is present and usable, each trigger is matched to
+        the frame actually captured closest to it (mode ``measured_timestamps``).
+        Otherwise it falls back to the legacy ``measured_fps`` linear model.
+        """
         db_path = output_dir / "triggers.sqlite3"
         csv_path = output_dir / "triggers.csv"
         if not db_path.exists():
@@ -1418,6 +1582,10 @@ class ExperimentCoordinator:
         effective_fps = float(alignment["effective_fps"])
         usable_start = int(alignment["usable_video_frame_start"])
         target_end_sample = int(alignment["target_end_sample"])
+        table = self._load_frame_time_seconds(output_dir, alignment)
+        mapper = self._make_timestamp_mapper(table["seconds"], usable_start) if table else None
+        mapping_mode = "measured_timestamps" if mapper is not None else "measured_fps"
+        alignment["frame_mapping_mode"] = mapping_mode
         try:
             with closing(sqlite3.connect(db_path)) as db:
                 rows = db.execute(
@@ -1438,6 +1606,8 @@ class ExperimentCoordinator:
                     if int(sample_number) >= target_end_sample:
                         frame_index_from_t0 = -1
                         video_frame_index = -1
+                    elif mapper is not None:
+                        frame_index_from_t0, video_frame_index = mapper(float(rel_seconds))
                     else:
                         frame_index_from_t0 = 1 + round(float(rel_seconds) * effective_fps)
                         video_frame_index = usable_start + frame_index_from_t0 - 1
@@ -1450,7 +1620,7 @@ class ExperimentCoordinator:
                             "sample_number": sample_number,
                             "frame_index": frame_index_from_t0,
                             "window_remaining": f"{float(window_remaining):.3f}",
-                            "frame_mapping_mode": "measured_fps",
+                            "frame_mapping_mode": mapping_mode,
                             "sample_offset_from_t0": sample_offset,
                             "frame_index_from_t0": frame_index_from_t0,
                             "video_frame_index_estimated": video_frame_index,
@@ -1458,9 +1628,12 @@ class ExperimentCoordinator:
                         }
                     )
                 db.executemany(
-                    "update triggers set frame_index = ?, frame_mapping_mode = 'measured_fps', "
+                    "update triggers set frame_index = ?, frame_mapping_mode = ?, "
                     "frame_index_from_t0 = ?, video_frame_index_estimated = ? where trigger_index = ?",
-                    updates,
+                    [
+                        (frame_index, mapping_mode, frame_from_t0, video_frame, trigger_index)
+                        for (frame_index, frame_from_t0, video_frame, trigger_index) in updates
+                    ],
                 )
                 db.commit()
             with csv_path.open("w", newline="", encoding="utf-8") as csv_file:
@@ -1485,6 +1658,145 @@ class ExperimentCoordinator:
                     writer.writerow(row)
         except Exception as exc:  # noqa: BLE001
             self._logger.warning("Rewriting trigger frame mapping with measured fps failed: %s", exc)
+
+    def _apply_frame_timing_diagnostics(self, output_dir: Path, alignment: Dict[str, Any]) -> None:
+        """Camera 1: real frame-timing diagnostics + truthful frame_map."""
+        # These four are only used when a frame_times table exists; default to 0
+        # so the "unavailable" path never requires them.
+        self._apply_frame_timing_diagnostics_for(
+            output_dir,
+            source_video_name=alignment.get("files", {}).get("source_video", "mrc_recording.mp4"),
+            usable_video_frame_start=int(alignment.get("usable_video_frame_start", 0)),
+            expected_total_frames=int(alignment.get("expected_total_frames", 0)),
+            t0_sample_number=int(alignment.get("t0_sample_number", 0)),
+            sample_rate_hz=int(alignment.get("sample_rate_hz", 0)),
+            target=alignment,
+            files_dict=alignment.setdefault("files", {}),
+            files_key="frame_times",
+            frame_map_name="frame_map.csv",
+        )
+
+    def _apply_frame_timing_diagnostics_for(
+        self,
+        output_dir: Path,
+        *,
+        source_video_name: str,
+        usable_video_frame_start: int,
+        expected_total_frames: int,
+        t0_sample_number: int,
+        sample_rate_hz: int,
+        target: Dict[str, Any],
+        files_dict: Dict[str, Any],
+        files_key: str,
+        frame_map_name: str,
+    ) -> None:
+        """Attach real frame-timing diagnostics for one camera and, when its
+        per-frame timestamps exist, write a truthful frame_map. This is what
+        makes dropped frames *visible and located* instead of smeared by the
+        effective_fps model. Applied identically to camera 1 and camera 2 (they
+        differ only in source video, frame_map name, and target dict).
+        """
+        table = self._load_frame_time_seconds_for(output_dir, source_video_name)
+        if table is None:
+            target["frame_timing"] = {
+                "status": "unavailable",
+                "reason": "frame_times.csv missing or unusable; alignment used the effective_fps model",
+            }
+            target["frame_mapping_mode"] = "measured_fps"
+            return
+        seconds = table["seconds"]
+        n = len(seconds)
+        deltas = [later - earlier for earlier, later in zip(seconds, seconds[1:])]
+        ordered = sorted(deltas)
+        median_dt = ordered[len(ordered) // 2] if ordered else 0.0
+        drop_events: List[Dict[str, Any]] = []
+        dropped_frames_estimate = 0
+        if median_dt > 0:
+            for index, delta in enumerate(deltas):
+                missing = int(round(delta / median_dt)) - 1
+                if missing >= 1 and delta > median_dt * 1.5:
+                    dropped_frames_estimate += missing
+                    if len(drop_events) < 200:
+                        drop_events.append(
+                            {
+                                "after_video_frame_index": index + 1,
+                                "at_seconds": round(seconds[index] - seconds[0], 6),
+                                "gap_seconds": round(delta, 6),
+                                "missing_frames_estimate": missing,
+                            }
+                        )
+        span = seconds[-1] - seconds[0]
+        target["frame_timing"] = {
+            "status": "ok",
+            "source": table["source"],
+            "frame_count": n,
+            "median_frame_interval_seconds": round(median_dt, 6),
+            "measured_fps_from_timestamps": round((n - 1) / span, 6) if span > 0 else None,
+            "dropped_frames_estimate": dropped_frames_estimate,
+            "drop_event_count": len(drop_events),
+            "drop_events": drop_events,
+            "frame_times_file": table["path"].name,
+        }
+        target["frame_mapping_mode"] = "measured_timestamps"
+        files_dict[files_key] = table["path"].name
+        try:
+            self._write_frame_map_from_timestamps_for(
+                output_dir / frame_map_name,
+                table["seconds"],
+                usable_video_frame_start=usable_video_frame_start,
+                expected_total_frames=expected_total_frames,
+                t0_sample_number=t0_sample_number,
+                sample_rate_hz=sample_rate_hz,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("Writing measured frame_map (%s) failed: %s", frame_map_name, exc)
+
+    @staticmethod
+    def _write_frame_map_from_timestamps_for(
+        path: Path,
+        seconds: List[float],
+        *,
+        usable_video_frame_start: int,
+        expected_total_frames: int,
+        t0_sample_number: int,
+        sample_rate_hz: int,
+    ) -> None:
+        """Truthful frame_map for one camera: each frame's *real* capture time.
+
+        Keeps the same column names as the synthetic writer so it is a drop-in
+        replacement for any downstream consumer.
+        """
+        usable_start = int(usable_video_frame_start)
+        frame_count = len(seconds)
+        ref0 = usable_start - 1
+        if ref0 < 0 or ref0 >= frame_count:
+            return
+        ref_time = seconds[ref0]
+        with path.open("w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.DictWriter(
+                csv_file,
+                fieldnames=[
+                    "relative_frame_index",
+                    "video_frame_index_estimated",
+                    "relative_time_seconds",
+                    "estimated_sample_number",
+                ],
+            )
+            writer.writeheader()
+            for relative_frame_index in range(1, int(expected_total_frames) + 1):
+                frame0 = ref0 + (relative_frame_index - 1)
+                if frame0 >= frame_count:
+                    break
+                relative_time_seconds = seconds[frame0] - ref_time
+                writer.writerow(
+                    {
+                        "relative_frame_index": relative_frame_index,
+                        "video_frame_index_estimated": frame0 + 1,
+                        "relative_time_seconds": f"{relative_time_seconds:.9f}",
+                        "estimated_sample_number": int(t0_sample_number)
+                        + round(relative_time_seconds * int(sample_rate_hz)),
+                    }
+                )
 
     def _finalize_aligned_video(self, alignment_path: Path, alignment: Dict[str, Any]) -> None:
         source_text = self.status().video_file
@@ -1516,6 +1828,7 @@ class ExperimentCoordinator:
                     sample_rate_hz=self.config.daq.sample_rate_hz,
                 )
                 self._rewrite_trigger_frames(alignment_path.parent, alignment)
+                self._apply_frame_timing_diagnostics(alignment_path.parent, alignment)
                 with self._lock:
                     self._status.expected_total_frames = int(alignment["expected_total_frames"])
                     self._status.video_t0_frame_estimated = int(alignment["video_t0_frame_estimated"])
@@ -1605,6 +1918,23 @@ class ExperimentCoordinator:
                 "Camera2 video timing measurement unavailable (%s); falling back to nominal fps.",
                 timing2.get("reason"),
             )
+        # Camera 2 gets the same real-timestamp treatment as camera 1: drop
+        # diagnostics + a truthful frame_map from its own frame_times.csv.
+        try:
+            self._apply_frame_timing_diagnostics_for(
+                alignment_path.parent,
+                source_video_name=source_video.name,
+                usable_video_frame_start=int(camera2_alignment.get("usable_video_frame_start", 0)),
+                expected_total_frames=int(camera2_alignment.get("expected_total_frames", 0)),
+                t0_sample_number=int(alignment.get("t0_sample_number", 0)),
+                sample_rate_hz=int(alignment.get("sample_rate_hz", 0)),
+                target=camera2_alignment,
+                files_dict=alignment.setdefault("files", {}),
+                files_key="frame_times_camera2",
+                frame_map_name="frame_map_camera2.csv",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning("Camera2 frame-timing diagnostics failed: %s", exc)
         output_video = source_video.with_name(f"{source_video.stem}_aligned{source_video.suffix}")
         trim_result = self._trim_video_from_t0(
             source_video=source_video,

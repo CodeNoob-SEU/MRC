@@ -12,6 +12,7 @@ import ctypes
 import json
 import logging
 import platform
+import re
 import subprocess
 from typing import Any, Dict, List
 
@@ -21,6 +22,23 @@ _CREATE_NO_WINDOW = 0x08000000
 
 def is_windows() -> bool:
     return platform.system() == "Windows"
+
+
+def pnp_pattern_from_device_name(device_name: str) -> str:
+    """Build a PnP FriendlyName ``-like`` pattern from a DirectShow device name.
+
+    The vendor SDK's ``DXGetDeviceName`` appends an instance suffix (e.g.
+    ``ZhongAn US2000 Video Capture 0#``) that the Windows PnP FriendlyName
+    (``ZhongAn US2000 Video Capture``) does not carry. Matching on the raw name
+    therefore never finds the device, so the device-reset escape hatch silently
+    fails. Strip that trailing `` N#`` suffix so the pattern matches.
+    """
+    name = (device_name or "").strip()
+    # Strip a trailing, space-separated instance index (" 0#", " 1", "#") only;
+    # never bare trailing digits that are part of the name itself (e.g. US2000).
+    base = re.sub(r"(\s+\d+\s*#?|\s*#)\s*$", "", name).strip()
+    base = base or name
+    return f"*{base}*" if base else ""
 
 
 def is_admin() -> bool:
@@ -37,6 +55,10 @@ def _run_powershell(script: str, timeout: float = 30.0) -> subprocess.CompletedP
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
         text=True,
+        # PowerShell error text on a Chinese Windows is GBK/mbcs, not UTF-8;
+        # without errors="replace" the decode raises and cascades into a bogus
+        # "list index out of range" that masks the real reset failure.
+        errors="replace",
         timeout=timeout,
         creationflags=_CREATE_NO_WINDOW if is_windows() else 0,
     )

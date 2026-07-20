@@ -11,3 +11,4 @@ __pycache__/
 .download/
 vendor/ffmpeg/windows/
 logs/
+.DS_Store

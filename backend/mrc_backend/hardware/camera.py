@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from pathlib import Path
 import base64
+import csv
 import ctypes
 import os
 import platform
 import queue
+import subprocess
 import tempfile
 import threading
 import time
@@ -94,6 +96,8 @@ class CameraStatus:
     capture_status: str = ""
     preview_status: str = ""
     preview_started: bool = False
+    frame_times_file: str = ""
+    frame_timestamps_status: str = ""
 
 
 class BaseCamera:
@@ -123,6 +127,8 @@ class BaseCamera:
 class MockCamera(BaseCamera):
     def __init__(self) -> None:
         self._status = CameraStatus(mode="mock")
+        self._rec_start_ns: Optional[int] = None
+        self._active_file: Optional[Path] = None
 
     def initialize(self) -> CameraStatus:
         self._status.initialized = True
@@ -138,13 +144,49 @@ class MockCamera(BaseCamera):
             f"Mock video placeholder created at {time.time():.3f}\n",
             encoding="utf-8",
         )
+        self._rec_start_ns = time.monotonic_ns()
+        self._active_file = output_file
         self._status.recording = True
         self._status.active_file = str(output_file)
+        self._status.frame_times_file = ""
+        self._status.frame_timestamps_status = "recording"
         return self.status()
 
     def stop_recording(self) -> CameraStatus:
         self._status.recording = False
+        self._write_mock_frame_times()
         return self.status()
+
+    def _write_mock_frame_times(self) -> None:
+        """Emit a uniform 30 fps frame_times.csv matching the mock duration.
+
+        Mirrors the real camera's sidecar so the alignment pipeline and tests
+        exercise the timestamp path off-Windows.
+        """
+        # Opt-in only: the mock's timestamps track real wall-clock elapsed, so
+        # emitting them by default would make integration tests nondeterministic.
+        # Set MRC_MOCK_FRAME_TIMES=1 to exercise the full pipeline in mock mode.
+        if os.getenv("MRC_MOCK_FRAME_TIMES", "0").lower() not in {"1", "true", "yes", "on"}:
+            return
+        start_ns = self._rec_start_ns
+        active = self._active_file
+        if start_ns is None or active is None:
+            return
+        fps = 30.0
+        elapsed_ns = max(0, time.monotonic_ns() - start_ns)
+        frame_count = int(elapsed_ns / 1_000_000_000 * fps)
+        path = active.with_name(f"{active.stem}_frame_times.csv")
+        try:
+            with path.open("w", newline="", encoding="utf-8") as csv_file:
+                writer = csv.writer(csv_file)
+                writer.writerow(["video_frame_index", "capture_ns"])
+                for index in range(frame_count):
+                    offset_ns = int(index / fps * 1_000_000_000)
+                    writer.writerow([index, start_ns + offset_ns])
+            self._status.frame_times_file = str(path)
+            self._status.frame_timestamps_status = f"ok ({frame_count} frames, mock)"
+        except Exception:  # noqa: BLE001
+            pass
 
     def close(self) -> None:
         self._status.recording = False
@@ -200,6 +242,18 @@ class DXMediaCamera(BaseCamera):
         self._sdk_thread_id: Optional[int] = None
         self._preview_hwnd: Optional[int] = None
         self._preview_started = False
+        # Self-built capture pipeline (raw-frame callback -> ffmpeg). The ctypes
+        # callback object must stay referenced while registered or the DLL will
+        # call into freed memory.
+        self._sb_cb: Optional[Any] = None
+        self._sb_proc: Optional[subprocess.Popen] = None
+        self._sb_writer: Optional[threading.Thread] = None
+        self._sb_queue: Optional["queue.Queue"] = None
+        self._sb_stop: Optional[threading.Event] = None
+        self._sb_stamps: List[int] = []
+        self._sb_overflow = 0
+        self._sb_meta: Dict[str, int] = {}
+        self._sb_frame_times_path: Optional[Path] = None
 
     def _load(self) -> ctypes.CDLL:
         if platform.system() != "Windows":
@@ -775,6 +829,20 @@ class DXMediaCamera(BaseCamera):
         assert self._dll is not None
         output_file.parent.mkdir(parents=True, exist_ok=True)
         self._sync_video_status_on_sdk(self._dll)
+        if self.config.capture_mode == "selfbuilt":
+            try:
+                self._start_selfbuilt_on_sdk(output_file)
+                self._status.recording = True
+                self._status.active_file = str(output_file)
+                return self.status()
+            except Exception as exc:  # noqa: BLE001
+                # Fail safe: never lose a recording because the self-built path
+                # had a problem; fall through to the vendor capture path.
+                self._status.capture_status = f"selfbuilt failed ({exc}); falling back to DLL capture"
+                try:
+                    self._stop_selfbuilt_on_sdk()
+                except Exception:  # noqa: BLE001
+                    pass
         self._set_video_codec_on_sdk(self._dll)
         self._set_audio_codec_on_sdk(self._dll)
         attempts = self._capture_attempts(output_file)
@@ -855,12 +923,201 @@ class DXMediaCamera(BaseCamera):
 
     def _stop_recording_on_sdk(self) -> CameraStatus:
         self._ensure_com_initialized()
-        if self._dll is not None and self._handle is not None and self._status.recording:
+        if self._sb_cb is not None or self._sb_proc is not None:
+            # Self-built pipeline is active (or half-started): tear it down and
+            # flush frame_times.csv.
+            self._stop_selfbuilt_on_sdk()
+        elif self._dll is not None and self._handle is not None and self._status.recording:
             result = self._dll.DXStopCapture(self._handle)
             if result != 0:
                 raise CameraError(f"DXStopCapture failed with code {format_sdk_code(result)}")
         self._status.recording = False
         return self.status()
+
+    # ------------------------------------------------------------------
+    # Self-built capture pipeline: raw-frame callback -> ffmpeg encoder.
+    # The vendor DXStartCapture drops frames silently and stamps a CFR mp4;
+    # here we grab every delivered frame with a real monotonic timestamp and
+    # encode it ourselves, so alignment gets an exact per-frame time and drops
+    # (if any) become visible gaps instead of silent drift.
+    # ------------------------------------------------------------------
+
+    # datastru.h: enum {cs_rgb24, cs_rgb32, cs_yuy2}
+    _CS_TO_PIXFMT = {0: "bgr24", 1: "bgra", 2: "yuyv422"}
+
+    @staticmethod
+    def _raw_video_callback_type():
+        """WINFUNCTYPE for fnRawVideoCallback; ``None`` off Windows.
+
+        DXMediaCap.h:
+            unsigned (__stdcall *)(unsigned char* buffer, unsigned colorSpace,
+                unsigned width, unsigned height, unsigned bytesWidth, void* context)
+        """
+        winfunctype = getattr(ctypes, "WINFUNCTYPE", None)
+        if winfunctype is None:
+            return None
+        return winfunctype(
+            ctypes.c_uint,     # return code
+            ctypes.c_void_p,   # buffer
+            ctypes.c_uint,     # colorSpace
+            ctypes.c_uint,     # width
+            ctypes.c_uint,     # height
+            ctypes.c_uint,     # bytesWidth (stride)
+            ctypes.c_void_p,   # context
+        )
+
+    def _resolve_ffmpeg(self) -> Optional[str]:
+        candidate = os.getenv("MRC_FFMPEG", "").strip()
+        if candidate and Path(candidate).exists():
+            return candidate
+        vendor = self.repo_root / "vendor" / "ffmpeg" / "windows" / "bin" / "ffmpeg.exe"
+        return str(vendor) if vendor.exists() else None
+
+    def _start_selfbuilt_on_sdk(self, output_file: Path) -> None:
+        """Register the raw-frame callback and pipe frames to ffmpeg.
+
+        Runs on the SDK/STA thread. Raises on any setup failure so the caller
+        can fall back to the vendor capture path.
+        """
+        cb_type = self._raw_video_callback_type()
+        ffmpeg = self._resolve_ffmpeg()
+        if cb_type is None or ffmpeg is None or self._dll is None or self._handle is None:
+            raise CameraError(f"self-built capture unavailable (ffmpeg={ffmpeg})")
+
+        self._sb_frame_times_path = output_file.with_name(f"{output_file.stem}_frame_times.csv")
+        self._sb_stamps = []
+        self._sb_overflow = 0
+        self._sb_meta = {}
+        self._sb_stop = threading.Event()
+        self._sb_queue = queue.Queue(maxsize=300)  # ~10 s of headroom at 30 fps
+        q = self._sb_queue
+        meta = self._sb_meta
+
+        def _on_raw(buffer, colorspace, width, height, byteswidth, context):  # noqa: ANN001
+            # Runs on a DLL-owned thread; copy the frame out and hand it off.
+            try:
+                if not meta:
+                    meta.update(cs=int(colorspace), w=int(width), h=int(height), bw=int(byteswidth))
+                data = ctypes.string_at(buffer, int(byteswidth) * int(height))
+                try:
+                    # perf_counter_ns: high-resolution, monotonic real time.
+                    # Alignment uses these relative to the t0 frame, so absolute
+                    # epoch is irrelevant; resolution (vs coarse monotonic) is.
+                    q.put_nowait((data, time.perf_counter_ns()))
+                except queue.Full:
+                    self._sb_overflow += 1
+            except Exception:  # noqa: BLE001
+                pass
+            return 0
+
+        self._sb_cb = cb_type(_on_raw)
+        self._dll.DXStartRawVideoCallbackEx.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, cb_type, ctypes.c_void_p, ctypes.c_void_p
+        ]
+        self._dll.DXStartRawVideoCallbackEx.restype = ctypes.c_uint
+        self._dll.DXStopRawVideoCallbackEx.argtypes = [ctypes.c_void_p]
+        self._dll.DXStopRawVideoCallbackEx.restype = ctypes.c_uint
+        result = int(self._dll.DXStartRawVideoCallbackEx(self._handle, 0, self._sb_cb, None, None))
+        if result != 0:
+            self._sb_cb = None
+            raise CameraError(f"DXStartRawVideoCallbackEx failed: {format_sdk_code(result)}")
+
+        # Wait briefly for the first frame so we know the true pixel format/size.
+        deadline = time.monotonic() + 2.0
+        while not meta and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not meta:
+            raise CameraError("no raw frame arrived within 2s")
+        width = int(meta["w"])
+        height = int(meta["h"])
+        pix = self._CS_TO_PIXFMT.get(int(meta["cs"]), "yuyv422")
+        fps = max(1, int(round(self._status.fps or self.config.fps)))
+
+        cmd = [
+            ffmpeg, "-y",
+            "-f", "rawvideo", "-pix_fmt", pix, "-s", f"{width}x{height}", "-framerate", str(fps),
+            "-i", "-", "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+            str(output_file),
+        ]
+        self._sb_proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        proc = self._sb_proc
+        stamps = self._sb_stamps
+        stop_evt = self._sb_stop
+
+        def _writer() -> None:
+            while True:
+                try:
+                    data, ts = q.get(timeout=0.2)
+                except queue.Empty:
+                    if stop_evt.is_set() and q.empty():
+                        break
+                    continue
+                try:
+                    proc.stdin.write(data)
+                    stamps.append(ts)
+                except Exception:  # noqa: BLE001
+                    break
+
+        self._sb_writer = threading.Thread(target=_writer, name="mrc-selfbuilt-writer", daemon=True)
+        self._sb_writer.start()
+        self._status.capture_status = f"selfbuilt: {pix} {width}x{height} @ {fps}fps -> ffmpeg"
+        self._status.frame_timestamps_status = "recording"
+        self._status.frame_times_file = ""
+
+    def _stop_selfbuilt_on_sdk(self) -> None:
+        # Unregister the raw callback first so no frame arrives during teardown.
+        if self._sb_cb is not None and self._dll is not None and self._handle is not None:
+            try:
+                self._dll.DXStopRawVideoCallbackEx(self._handle)
+            except Exception:  # noqa: BLE001
+                pass
+        self._sb_cb = None
+        if self._sb_stop is not None:
+            self._sb_stop.set()
+        if self._sb_writer is not None:
+            self._sb_writer.join(timeout=6.0)
+        if self._sb_proc is not None:
+            try:
+                if self._sb_proc.stdin is not None:
+                    self._sb_proc.stdin.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self._sb_proc.wait(timeout=8.0)
+            except Exception:  # noqa: BLE001
+                try:
+                    self._sb_proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+        path = self._sb_frame_times_path
+        stamps = list(self._sb_stamps or [])
+        if path is not None and stamps:
+            try:
+                self._write_frame_times_csv(path, stamps)
+                self._status.frame_times_file = str(path)
+                self._status.frame_timestamps_status = (
+                    f"ok ({len(stamps)} frames, overflow={self._sb_overflow})"
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._status.frame_timestamps_status = f"write failed: {exc}"
+        elif path is not None:
+            self._status.frame_timestamps_status = "no frames captured"
+        self._sb_proc = None
+        self._sb_writer = None
+        self._sb_queue = None
+        self._sb_stop = None
+        self._sb_stamps = []
+
+    @staticmethod
+    def _write_frame_times_csv(path: Path, stamps: List[int]) -> None:
+        with path.open("w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["video_frame_index", "capture_ns"])
+            for index, capture_ns in enumerate(stamps):
+                writer.writerow([index, capture_ns])
 
     def reconnect(self) -> CameraStatus:
         try:

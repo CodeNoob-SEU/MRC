@@ -40,24 +40,30 @@ def make_coordinator(**config_overrides) -> ExperimentCoordinator:
 
 
 class SelfHealingTest(unittest.TestCase):
-    def test_repeated_reconnect_failures_escalate_to_device_reset(self) -> None:
+    def test_device_reset_runs_before_reconnect(self) -> None:
+        # This hardware wedges its driver on hot-plug, so a plain reconnect
+        # always fails; the PnP reset must run FIRST to unblock it.
         coordinator = make_coordinator()
         camera = DeadCamera()
-        reset_calls: list = []
+        events: list = []
 
         def fake_reset(camera_id: int) -> bool:
-            reset_calls.append(camera_id)
+            events.append("reset")
             camera.revive = True  # the reset "fixes" the device
             return True
 
+        original_reconnect = camera.reconnect
+
+        def tracking_reconnect():
+            events.append("reconnect")
+            return original_reconnect()
+
+        camera.reconnect = tracking_reconnect  # type: ignore[method-assign]
         coordinator._attempt_device_reset = fake_reset  # type: ignore[method-assign]
         try:
-            # 1st failure: below the escalation threshold, no reset yet
-            self.assertFalse(coordinator._try_reconnect_camera(1, camera))
-            self.assertEqual(reset_calls, [])
-            # 2nd failure: escalates to device reset, then reconnects OK
+            # First attempt already recovers: reset up front, then one reconnect.
             self.assertTrue(coordinator._try_reconnect_camera(1, camera))
-            self.assertEqual(reset_calls, [1])
+            self.assertEqual(events, ["reset", "reconnect"])  # reset BEFORE reconnect
             self.assertEqual(coordinator._reconnect_failures[1], 0)
         finally:
             coordinator.close()

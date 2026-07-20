@@ -190,7 +190,8 @@ class CameraProcessProxy(BaseCamera):
         "initialize": 30.0,
         "enumerate_devices": 15.0,
         "start_recording": 20.0,
-        "stop_recording": 10.0,
+        # Self-built capture finalizes ffmpeg (drain + flush moov) on stop.
+        "stop_recording": 25.0,
         "preview_frame_data_url": 3.0,
     }
     _INITIALIZE_ATTEMPTS = 2
@@ -311,7 +312,14 @@ class CameraProcessProxy(BaseCamera):
             proc.join(timeout=0.5)
             if proc.is_alive():
                 _LOGGER.warning("Terminating camera worker (pid=%s).", proc.pid)
-                proc.terminate()
+                # A worker wedged in a broken capture-driver call is
+                # un-terminable: terminate()/kill() raise WinError 5. Swallow it
+                # so reconnect can escalate to a PnP device reset (which unblocks
+                # the driver) instead of hammering the same wedged pid forever.
+                try:
+                    proc.terminate()
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.warning("terminate(pid=%s) failed: %s", proc.pid, exc)
                 proc.join(timeout=2.0)
             if proc.is_alive():
                 try:

@@ -40,6 +40,11 @@ $env:MRC_FAST_BACKEND_SHUTDOWN = if ($env:MRC_FAST_BACKEND_SHUTDOWN) { $env:MRC_
 
 if ($Mode -eq "real") {
   $env:MRC_VENDOR_ARCH = "win32"
+  # Self-built capture pipeline: raw-frame callback -> our own ffmpeg encoder,
+  # giving an exact real timestamp per frame (frame_times.csv) so alignment maps
+  # DAQ triggers to the real frame with no interpolation. Set to "dll" to fall
+  # back to the vendor DXStartCapture path.
+  $env:MRC_CAMERA_CAPTURE_MODE = if ($env:MRC_CAMERA_CAPTURE_MODE) { $env:MRC_CAMERA_CAPTURE_MODE } else { "selfbuilt" }
   $env:MRC_CAMERA_DEVICE_INDEX = [string]$CameraDeviceIndex
   $env:MRC_CAMERA2_ENABLED = if ($EnableCamera2) { "1" } elseif ($env:MRC_CAMERA2_ENABLED) { $env:MRC_CAMERA2_ENABLED } else { "auto" }
   $env:MRC_CAMERA2_DEVICE_INDEX = [string]$Camera2DeviceIndex
