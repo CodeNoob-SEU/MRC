@@ -118,6 +118,12 @@ function startBackend(): void {
     ? {
         MRC_HARDWARE_MODE: "real",
         MRC_VENDOR_ARCH: "win32",
+        // Match the source-run launcher (scripts/run_windows.ps1): use the
+        // self-built capture pipeline (real per-frame timestamps + strict
+        // alignment) rather than the vendor DXStartCapture default. Overridable
+        // via the environment. Every other MRC_CAMERA_* value the launcher sets
+        // is already the CameraConfig default, so this is the only gap.
+        MRC_CAMERA_CAPTURE_MODE: "selfbuilt",
         MRC_FAST_BACKEND_SHUTDOWN: "1",
         MRC_OUTPUT_ROOT: path.join(app.getPath("documents"), "MRC Runs"),
         MRC_LOG_DIR: logsDir(),
